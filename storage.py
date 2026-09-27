@@ -470,15 +470,36 @@ def validate_config(raw):
 # =============================================================================
 
 def _empty_vocab():
-    return {"terms": [], "corrections": {}, "dismissed": []}
+    return {"terms": [], "corrections": {}, "dismissed": [], "learned": {}}
+
+
+# Where a learned word came from (learning.py): "fix" - you corrected it after
+# Scribe typed it; "said" - you say it often.
+LEARNED_SOURCES = ("fix", "said")
+
+
+def _clean_learned(record):
+    """One `learned` entry, cleaned - or None if it isn't a valid one."""
+    if not isinstance(record, dict):
+        return None
+    source, at = record.get("from"), record.get("at")
+    if source not in LEARNED_SOURCES or not isinstance(at, str):
+        return None
+    out = {"from": source, "at": at}
+    wrong = record.get("wrong")
+    if isinstance(wrong, str) and wrong.strip():
+        out["wrong"] = wrong.strip()
+    return out
 
 
 def validate_vocab(raw):
     """
     Keep only entries that are real text: non-empty string terms, non-empty
-    string -> string corrections, string dismissed words (lowercased).
-    Returns (vocab, skipped_count). A null or blank correction would
-    otherwise make every dictation containing that word vanish.
+    string -> string corrections, string dismissed words (lowercased), and
+    `learned` records - which words Scribe learned by itself, and how
+    (learning.py) - keyed by the lowercased word. Returns (vocab,
+    skipped_count). A null or blank correction would otherwise make every
+    dictation containing that word vanish.
     """
     vocab = _empty_vocab()
     skipped = 0
@@ -512,6 +533,16 @@ def validate_vocab(raw):
                     vocab["dismissed"].append(d.strip().lower())
             else:
                 skipped += 1
+    learned = raw.get("learned", {})
+    if isinstance(learned, dict):
+        for word, record in learned.items():
+            clean = _clean_learned(record)
+            if isinstance(word, str) and word.strip() and clean:
+                vocab["learned"][word.strip().lower()] = clean
+            else:
+                skipped += 1
+    else:
+        skipped += 1
     return vocab, skipped
 
 
@@ -731,10 +762,13 @@ def load_vocab():
 
 
 def _vocab_file_form(vocab):
-    """The on-disk shape: terms + corrections, and dismissed only if any."""
+    """The on-disk shape: terms + corrections, and dismissed / learned only
+    if there are any (so a hand-made file stays as simple as it was)."""
     out = {"terms": vocab["terms"], "corrections": vocab["corrections"]}
     if vocab["dismissed"]:
         out["dismissed"] = vocab["dismissed"]
+    if vocab.get("learned"):
+        out["learned"] = vocab["learned"]
     return out
 
 

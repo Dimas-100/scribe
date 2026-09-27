@@ -225,7 +225,7 @@ def test_invalid_keys_notice():
 def test_vocab_recovery_and_save():
     _reset_data_dir()
     vocab, notices = storage.load_vocab()
-    assert vocab == {"terms": [], "corrections": {}, "dismissed": []} and not notices
+    assert vocab == {"terms": [], "corrections": {}, "dismissed": [], "learned": {}} and not notices
     assert not os.path.exists(storage.VOCAB_FILE), "loading must not create the file"
     storage.save_vocab({"terms": ["Vercel"], "corrections": {"versel": "Vercel"}})
     _write(storage.VOCAB_FILE, '{"terms": ["Vercel"')
@@ -429,6 +429,29 @@ def test_polish_style_is_validated():
     print("PASS  polish_style accepts full / light only; full by default.")
 
 
+def test_vocab_keeps_learned_words():
+    raw = {"terms": ["Kalshee", "Webull"], "corrections": {"cal she": "Kalshee"},
+           "learned": {"kalshee": {"from": "fix", "at": "2026-09-27T10:00:00", "wrong": "cal she"},
+                       "Webull": {"from": "said", "at": "2026-09-27T11:00:00"},
+                       "odd": {"from": "magic", "at": "x"},             # unknown source
+                       "worse": "not a record",
+                       "": {"from": "said", "at": "x"}}}
+    vocab, skipped = storage.validate_vocab(raw)
+    assert vocab["learned"] == {
+        "kalshee": {"from": "fix", "at": "2026-09-27T10:00:00", "wrong": "cal she"},
+        "webull": {"from": "said", "at": "2026-09-27T11:00:00"}}, vocab["learned"]
+    assert skipped == 3, skipped
+    assert storage.validate_vocab({"terms": []})[0]["learned"] == {}, "older files: none"
+    # Saved and read back; the file carries "learned" only when there is some.
+    storage.save_vocab(vocab)
+    again, _ = storage.load_vocab()
+    assert again["learned"] == vocab["learned"]
+    storage.save_vocab(dict(vocab, learned={}))
+    on_disk = json.load(open(storage.VOCAB_FILE, encoding="utf-8"))
+    assert "learned" not in on_disk
+    print("PASS  vocabulary.json keeps what Scribe learned (and why); bad entries are dropped.")
+
+
 if __name__ == "__main__":
     test_data_dir_override()
     test_atomic_write_leaves_no_temp_files()
@@ -457,4 +480,5 @@ if __name__ == "__main__":
     test_a_last_line_without_a_newline()
     test_theme_is_validated()
     test_polish_style_is_validated()
+    test_vocab_keeps_learned_words()
     print("\nAll storage tests passed.")

@@ -118,6 +118,76 @@ def test_is_variant():
     print("PASS  is_variant spots a mishearing of a known word.")
 
 
+# --- Part 1: the words you fixed ---------------------------------------------
+
+def test_find_fixes_learns_real_fixes():
+    ff = learning.find_fixes
+    assert ff("ask cal she about the odds", "ask Kalshee about the odds") == [("cal she", "Kalshee")]
+    assert ff("the kalshee market", "the Kalshee market") == [("kalshee", "Kalshee")], \
+        "a rare word's capitals"
+    assert ff("the text two speech demo", "the text-to-speech demo") == \
+        [("text two speech", "text-to-speech")], "the user's hyphens are kept"
+    assert ff("Ask cal she, then web bull.", "Ask Kalshee, then Webull.") == \
+        [("cal she", "Kalshee"), ("web bull", "Webull")], "two fixes in one take"
+    print("PASS  find_fixes learns the words you corrected, as you wrote them.")
+
+
+def test_find_fixes_ignores_everything_else():
+    ff = learning.find_fixes
+    assert ff("buy an apple today", "buy an Apple today") == [], "an everyday word's capitals"
+    assert ff("put it there please", "put it their please") == [], "grammar: both everyday"
+    assert ff("let's have a meeting", "let's have a call") == [], "a different word, not a fix"
+    assert ff("send 25 dollars", "send 35 dollars") == [], "numbers"
+    assert ff("send it to cal she", "send it to cal she and more words") == [], "appended"
+    assert ff("send it to cal she now", "send it now") == [], "deleted"
+    assert ff("one two three four five six seven eight",
+              "uno dos tres cuatro cinco seis siete ocho") == [], "a rewrite"
+    assert ff("we met on the first floor of the big blue building downtown",
+              "we met in a small cafe near the station yesterday") == [], "rewritten"
+    assert ff("", "anything") == [] and ff("words here", "") == []
+    assert ff("ask cal she about it", "ask Kalshee Kalshee Kalshee Kalshee about it") == [], \
+        "more than 3 words for 2"
+    print("PASS  find_fixes ignores rewrites, grammar, numbers, additions and deletions.")
+
+
+def test_find_region():
+    fr = learning.find_region
+    assert fr("Hi ", " Bye", "Hi fixed words Bye") == "fixed words"
+    assert fr("Hi ", "", "Hi fixed words and more") == "fixed words and more"
+    assert fr("", " Bye", "fixed words Bye") == "fixed words"
+    assert fr("", "", "whole box") == "whole box"
+    assert fr("Hi ", " Bye", "Something else entirely") is None, "the anchors are gone"
+    assert fr("Hi ", " Bye", "Bye first, then Hi words") is None, "after-anchor must follow"
+    print("PASS  find_region finds Scribe's text between its anchors, or says it's gone.")
+
+
+# --- Adding and removing a learned word --------------------------------------
+
+def test_learn_and_forget():
+    v = _vocab(terms=["Sam"])
+    assert learning.learn(v, "Kalshee", "cal she", "fix", now="2026-09-27T10:00:00")
+    assert v["terms"][-1] == "Kalshee" and v["corrections"]["cal she"] == "Kalshee"
+    assert v["learned"]["kalshee"] == {"from": "fix", "at": "2026-09-27T10:00:00", "wrong": "cal she"}
+    assert not learning.learn(v, "Kalshee", "cal she", "fix"), "nothing new"
+    assert learning.learn(v, "Webull", source="said", now="2026-09-27T11:00:00")
+    assert v["learned"]["webull"] == {"from": "said", "at": "2026-09-27T11:00:00"}
+    assert learning.forget(v, "Kalshee")
+    assert "Kalshee" not in v["terms"] and "cal she" not in v["corrections"]
+    assert "kalshee" in v["dismissed"] and "kalshee" not in v["learned"]
+    assert v["terms"] == ["Sam", "Webull"], "other words stay"
+    assert not learning.learn(v, "Kalshee", "cal she"), "a removed word never comes back"
+    assert not learning.forget(v, "never-there")
+    print("PASS  learn adds a word (and its fix); forget removes it for good.")
+
+
+def test_learn_keeps_a_manual_term_and_updates_capitals():
+    v = _vocab(terms=["kalshee"])
+    assert learning.learn(v, "Kalshee", "kalshee", "fix", now="t")
+    assert v["terms"] == ["Kalshee"], "the fixed spelling replaces the old one"
+    assert v["corrections"] == {"kalshee": "Kalshee"}
+    print("PASS  a capitals fix updates the term's spelling.")
+
+
 if __name__ == "__main__":
     test_suggestions_keep_the_users_spelling()
     test_unicode_words_are_one_word()
@@ -128,4 +198,9 @@ if __name__ == "__main__":
     test_auto_terms_respect_the_dictionary()
     test_auto_terms_need_one_spelling()
     test_is_variant()
+    test_find_fixes_learns_real_fixes()
+    test_find_fixes_ignores_everything_else()
+    test_find_region()
+    test_learn_and_forget()
+    test_learn_keeps_a_manual_term_and_updates_capitals()
     print("\nAll learning tests passed.")

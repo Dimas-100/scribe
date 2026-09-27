@@ -24,6 +24,7 @@
 
 import difflib
 import re
+from datetime import datetime
 
 # Bundled common-English-word list: an everyday word is never learned as a
 # name. Soft import: if the data module is somehow missing, learning still
@@ -260,3 +261,200 @@ def auto_terms(index, vocab):
             continue
         out.append(spelling)
     return out
+
+
+# =============================================================================
+#  PART 1  -  the words you fixed.
+# =============================================================================
+
+FIX_MAX_WORDS = 3        # a fix swaps at most 3 words for at most 3
+FIX_MAX_CHANGES = 3      # more changes than this in one take = a rewrite, not fixes
+FIX_SIMILARITY = 0.5     # "cal she" ~ "Kalshi" (a mishearing); "meeting" !~ "call"
+ANCHOR_CHARS = 40        # the text around Scribe's text, to find it again
+
+# A word as you see it: letters and digits, with inner apostrophes ("don't").
+# Hyphens and other punctuation split words - but a fix keeps them, because
+# it is cut from your text itself ("text-to-speech").
+_FIX_WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)*")
+# What joins two words into one written unit: "text-to-speech", "and/or".
+_JOINERS = "-/"
+
+
+def _word_spans(text):
+    """[(start, end, word)] for each word in `text`."""
+    return [(m.start(), m.end(), m.group()) for m in _FIX_WORD.finditer(text or "")]
+
+
+def _everyday(words):
+    return all(w.lower() in COMMON_WORDS or w.lower().replace("'", "") in COMMON_WORDS
+               for w in words)
+
+
+def _joined(text, spans, j):
+    """Is word j of `spans` joined to word j+1 by a hyphen or slash?"""
+    if j + 1 >= len(spans):
+        return False
+    between = text[spans[j][1]:spans[j + 1][0]]
+    return between != "" and all(c in _JOINERS for c in between)
+
+
+def _is_fix(wrong_words, right_words, right_text):
+    """Does replacing `wrong_words` with `right_words` look like correcting a
+    mishearing - not rewording, grammar or a changed number?"""
+    if not (1 <= len(wrong_words) <= FIX_MAX_WORDS and 1 <= len(right_words) <= FIX_MAX_WORDS):
+        return False
+    if any(ch.isdigit() for w in wrong_words + right_words for ch in w):
+        return False                                   # a changed number isn't a mishearing
+    if len(right_text) < 2:
+        return False
+    alike = difflib.SequenceMatcher(
+        None, "".join(wrong_words).lower(), "".join(right_words).lower()).ratio()
+    if alike < FIX_SIMILARITY:
+        return False                                   # a different word, not a spelling
+    # Everyday words on both sides are grammar ("their" -> "there") - unless
+    # the fix is about writing them as one ("text two speech" ->
+    # "text-to-speech", "face book" -> "facebook").
+    if _everyday(wrong_words) and _everyday(right_words):
+        joins = any(c in _JOINERS for c in right_text) or len(right_words) < len(wrong_words)
+        if not joins:
+            return False
+    return True
+
+
+def find_fixes(typed, final):
+    """
+    The words you corrected: [(wrong, right)], in order. `typed` is what
+    Scribe typed, `final` what you left in its place. `wrong` is cut from
+    `typed`, `right` from `final` - so your spelling, capitals and hyphens are
+    kept exactly. Only real fixes count (see _is_fix): 1-3 words for 1-3
+    words, alike in letters, no numbers, not grammar; a capitals-only change
+    only for a word that isn't everyday ("kalshi" -> "Kalshi", never "apple"
+    -> "Apple"). More than FIX_MAX_CHANGES changes in one take is a rewrite:
+    nothing is learned from it.
+    """
+    a, b = _word_spans(typed), _word_spans(final)
+    if not a or not b:
+        return []
+    ops = difflib.SequenceMatcher(
+        None, [w.lower() for _s, _e, w in a], [w.lower() for _s, _e, w in b],
+        autojunk=False).get_opcodes()
+    changes, found = 0, []
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            # Same words, maybe other capitals: each one is a change.
+            for k in range(i2 - i1):
+                was, now = a[i1 + k][2], b[j1 + k][2]
+                if was != now:
+                    changes += 1
+                    if not _everyday([now]):
+                        found.append((was, now))
+            continue
+        changes += 1
+        if tag != "replace":
+            continue                                   # added or removed words: not a fix
+        # A fix that joins words ("to" in "text-to-speech") takes the whole
+        # joined unit, on both sides.
+        while j1 > 0 and i1 > 0 and _joined(final, b, j1 - 1):
+            i1, j1 = i1 - 1, j1 - 1
+        while j2 < len(b) and i2 < len(a) and _joined(final, b, j2 - 1):
+            i2, j2 = i2 + 1, j2 + 1
+        wrong = typed[a[i1][0]:a[i2 - 1][1]]
+        right = final[b[j1][0]:b[j2 - 1][1]]
+        if _is_fix([w for _s, _e, w in a[i1:i2]], [w for _s, _e, w in b[j1:j2]], right):
+            found.append((wrong, right))
+    return [] if changes > FIX_MAX_CHANGES else found
+
+
+def find_region(before, after, text):
+    """
+    Where Scribe's text is in `text` now: between `before` and `after` - the
+    characters just before and after it when Scribe typed it (either may be
+    empty, at the start or end of the box). None when an anchor can't be
+    found - the message was sent, the box cleared or rewritten.
+    """
+    if text is None:
+        return None
+    start = 0
+    if before:
+        i = text.find(before)
+        if i < 0:
+            return None
+        start = i + len(before)
+    end = len(text)
+    if after:
+        j = text.find(after, start)
+        if j < 0:
+            return None
+        end = j
+    return text[start:end]
+
+
+# =============================================================================
+#  ADDING AND REMOVING A LEARNED WORD  -  in a vocabulary dict.
+# =============================================================================
+
+def learn(vocab, right, wrong=None, source="fix", now=None):
+    """
+    Add a learned word to `vocab` (changed in place): `right` becomes a
+    term, and with `wrong` also the correction wrong -> right. `source` is
+    "fix" or "said"; `learned` records it, with the time (`now`, ISO text;
+    the current time by default). A word you removed (in `dismissed`) is
+    never learned again. Returns True if anything changed.
+    """
+    right = (right or "").strip()
+    wrong = (wrong or "").strip() or None
+    key = right.lower()
+    if not key or key in {str(d).strip().lower() for d in vocab.get("dismissed", ())}:
+        return False
+    changed = False
+    terms = vocab.setdefault("terms", [])
+    same = [i for i, t in enumerate(terms) if str(t).strip().lower() == key]
+    if not same:
+        terms.append(right)
+        changed = True
+    elif source == "fix" and terms[same[0]] != right:
+        terms[same[0]] = right                    # your fixed spelling wins
+        changed = True
+    if wrong:
+        corrections = vocab.setdefault("corrections", {})
+        old = [w for w in corrections if str(w).strip().lower() == wrong.lower()]
+        if [corrections[w] for w in old] != [right]:
+            for w in old:
+                del corrections[w]
+            corrections[wrong.lower()] = right
+            changed = True
+    if changed:
+        record = {"from": source, "at": now or datetime.now().isoformat(timespec="seconds")}
+        if wrong:
+            record["wrong"] = wrong
+        vocab.setdefault("learned", {})[key] = record
+    return changed
+
+
+def forget(vocab, word):
+    """
+    Remove `word` from `vocab` (changed in place) for good: its term, every
+    correction that turns something into it, and its `learned` record - and
+    add it to `dismissed`, so it is never learned again. Returns True if
+    anything changed.
+    """
+    key = (word or "").strip().lower()
+    if not key:
+        return False
+    changed = False
+    terms = vocab.get("terms", [])
+    kept = [t for t in terms if str(t).strip().lower() != key]
+    if len(kept) != len(terms):
+        vocab["terms"] = kept
+        changed = True
+    corrections = vocab.get("corrections", {})
+    for w in [w for w, r in corrections.items() if str(r).strip().lower() == key]:
+        del corrections[w]
+        changed = True
+    if vocab.get("learned", {}).pop(key, None) is not None:
+        changed = True
+    if changed:
+        dismissed = vocab.setdefault("dismissed", [])
+        if key not in dismissed:
+            dismissed.append(key)
+    return changed
