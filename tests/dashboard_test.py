@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -463,6 +464,9 @@ def test_log_entries_new_fields_are_typed():
     odd = dashboard._clean_log_entry({"timestamp": "2026-09-26T10:00:00", "text": "hi",
                                       "latency": float("nan"), "polished": True})
     assert "latency" not in odd and "polished" not in odd, odd   # polished needs the words said
+    fixed = [dashboard._clean_log_entry({"timestamp": "2026-09-26T10:00:00", "text": "hi",
+                                         "fixed": value}).get("fixed") for value in (2, "3", -1, True, 1.5)]
+    assert fixed == [2, None, None, None, None], fixed
     print("PASS  a hand-edited log can't break the page with wrong-typed new fields.")
 
 
@@ -569,6 +573,65 @@ def test_page_redesign():
     print("PASS  the redesigned page: theme saved, old look gone, CSP kept, every id there.")
 
 
+LEARNED_VOCAB = {"terms": ["Sam", "Kalshee", "Webull"], "corrections": {"cal she": "Kalshee"},
+                 "learned": {"kalshee": {"from": "fix", "at": "2026-09-27T10:00:00", "wrong": "cal she"},
+                             "webull": {"from": "said", "at": "2026-09-27T11:00:00"}}}
+
+
+def test_the_page_gets_what_was_learned():
+    storage.save_vocab(LEARNED_VOCAB)
+    with mock.patch.object(dashboard.devices, "list_input_devices", return_value=[]), \
+         mock.patch.object(dashboard, "build_app_icons", return_value={}):
+        data = dashboard.JsApi().get_initial_data()
+    assert data["vocab"]["learned"] == LEARNED_VOCAB["learned"]
+    assert data["vocab"]["corrections"] == [["cal she", "Kalshee"]] or \
+        data["vocab"]["corrections"] == [("cal she", "Kalshee")]
+    print("PASS  the page gets the learned words, with where they came from.")
+
+
+def test_removing_a_learned_word_is_for_good():
+    storage.save_vocab(LEARNED_VOCAB)
+    with mock.patch.object(dashboard.instance, "send", return_value=True) as send:
+        state = dashboard.JsApi().remove_learned_word("Kalshee")
+    assert send.call_args.args[0] == {"cmd": "reload-config"}, "the app drops it at once"
+    vocab = storage.load_vocab()[0]
+    assert "Kalshee" not in vocab["terms"] and vocab["corrections"] == {}
+    assert "kalshee" not in vocab["learned"] and "kalshee" in vocab["dismissed"]
+    assert "kalshee" not in state["vocab"]["learned"] and "webull" in state["vocab"]["learned"]
+    print("PASS  removing a learned word takes its term and fix, and it never comes back.")
+
+
+def test_a_poll_brings_newly_learned_words():
+    _log(["one"])
+    storage.save_vocab({"terms": [], "corrections": {}})
+    dashboard.HISTORY = dashboard.HistoryCache(os.path.join(TMP, "dictation_log.jsonl"))
+    api = dashboard.JsApi()
+    with mock.patch.object(dashboard.devices, "list_input_devices", return_value=[]), \
+         mock.patch.object(dashboard, "build_app_icons", return_value={}):
+        data = api.get_initial_data()
+        quiet = api.poll_updates(data["log_sig"], data["history_gen"], len(data["entries"]))
+        assert quiet["changed"] is False and "vocab" not in quiet, quiet
+        time.sleep(0.05)
+        storage.save_vocab(LEARNED_VOCAB)      # the app learned a word - no new dictation
+        news = api.poll_updates(data["log_sig"], data["history_gen"], len(data["entries"]))
+        assert news["changed"] is False and "webull" in news["vocab"]["learned"], news
+        again = api.poll_updates(data["log_sig"], data["history_gen"], len(data["entries"]))
+        assert "vocab" not in again, "sent once"
+    print("PASS  a word learned while the dashboard is open shows up on the next poll.")
+
+
+def test_page_has_the_learning_parts():
+    html = open(os.path.join(ROOT, "dashboard.html"), encoding="utf-8").read()
+    assert 'id="set-learn"' in html and "learn_words: toggleValue('set-learn')" in html
+    assert storage.DEFAULT_CONFIG["learn_words"] is True
+    for needed in ('id="dict-learned-host"', 'id="ins-learned"', "remove_learned_word(",
+                   "if (update && update.vocab)"):
+        assert needed in html, needed
+    assert "dict-suggest" not in html and "dismiss_suggestion" not in html
+    assert "const plural = (n, word, many) =>" in html, "\"fixes\", not \"fixs\""
+    print("PASS  the page has Learned for you, the switch, and the Insights card.")
+
+
 if __name__ == "__main__":
     test_page_scripts_parse()
     test_both_themes_are_readable()
@@ -602,4 +665,8 @@ if __name__ == "__main__":
     test_a_same_size_edit_is_noticed()
     test_page_leftovers()
     test_the_window_opens_in_the_theme_colour()
+    test_the_page_gets_what_was_learned()
+    test_removing_a_learned_word_is_for_good()
+    test_a_poll_brings_newly_learned_words()
+    test_page_has_the_learning_parts()
     print("\nAll dashboard tests passed.")

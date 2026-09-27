@@ -325,6 +325,17 @@
     .corr-row .wrong { color: var(--text-2); text-decoration: line-through; text-decoration-color: var(--text-3); }
     .corr-row .arrow { color: var(--text-3); text-align: center; }
     .dict-footer { margin-top: 24px; font-size: 12.5px; color: var(--text-3); }
+    .learned-list { display: flex; flex-direction: column; }
+    .learned-row { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--border); font-size: 13.5px; }
+    .learned-row:first-child { border-top: 0; }
+    .learned-row .word { font-weight: 600; }
+    .learned-row .how { flex: 1; min-width: 0; color: var(--text-2); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .learned-row .when { color: var(--text-3); font-size: 12px; white-space: nowrap; }
+    .fix-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .fix-row input { flex: 1; min-width: 0; }
+    .fix-row .arrow { color: var(--text-3); }
+    .learned-chips { margin-top: 12px; }
+    .learned-chips .chip { padding: 0 10px; color: var(--text-2); }
 
     /* ==========================================================
        SETTINGS + FORM CONTROLS
@@ -642,6 +653,11 @@
           <div class="card metric" id="ins-consistency"></div>
         </div>
 
+        <div class="section">
+          <div class="section-head"><span class="section-title">Learned for you</span><span class="section-meta">Your Dictionary, filled in as you dictate</span></div>
+          <div class="card metric" id="ins-learned"></div>
+        </div>
+
         <div class="section" id="ins-words-panel">
           <div class="section-head"><span class="section-title">Words you use most</span><span class="section-meta">Common words left out</span></div>
           <div class="card metric"><div class="words" id="ins-words-list"></div></div>
@@ -651,7 +667,12 @@
       <!-- DICTIONARY ========================================== -->
       <section class="page" id="page-dictionary" hidden>
         <h1>Dictionary</h1>
-        <p class="page-sub">Teach Scribe your names and jargon. Changes apply from your next dictation.</p>
+        <p class="page-sub" id="dict-sub">Scribe learns your words as you go — the ones you fix after it types them, and the names you say often. Nothing to keep up with.</p>
+
+        <div class="dict-section">
+          <div class="dict-section-header"><h3>Learned for you</h3><span class="caption" id="dict-learned-count"></span></div>
+          <div id="dict-learned-host" class="card learned-list"><div class="empty">Nothing yet.</div></div>
+        </div>
 
         <div class="dict-section">
           <div class="dict-section-header"><h3>Your words</h3><span class="caption" id="dict-terms-count">0 words</span></div>
@@ -663,7 +684,13 @@
         </div>
 
         <div class="dict-section">
-          <div class="dict-section-header"><h3>Corrections</h3><span class="caption" id="dict-corr-count">0 corrections</span></div>
+          <div class="dict-section-header"><h3>Your fixes</h3><span class="caption" id="dict-corr-count">0 fixes</span></div>
+          <div class="fix-row">
+            <input type="text" id="dict-fix-wrong" spellcheck="false" placeholder="When Scribe types…" aria-label="When Scribe types" />
+            <span class="arrow" aria-hidden="true">→</span>
+            <input type="text" id="dict-fix-right" spellcheck="false" placeholder="…write this instead" aria-label="Write this instead" />
+            <button class="btn-sm" id="dict-fix-add">Add</button>
+          </div>
           <div id="dict-corr-host" class="card corr-list"><div class="empty">Nothing here yet.</div></div>
         </div>
 
@@ -703,6 +730,7 @@
               <div class="set-row toggle-field"><div class="desc">Add a space after each dictation<div class="help">Keeps back-to-back dictations from running together.</div></div><div class="control"><button type="button" class="toggle" id="set-trailing" role="switch" aria-checked="false" aria-label="Add a space after each dictation"></button></div></div>
               <div class="set-row toggle-field"><div class="desc">Paste mode<div class="help">Delivers text through the clipboard — instant for long dictations.</div></div><div class="control"><button type="button" class="toggle" id="set-paste" role="switch" aria-checked="false" aria-label="Paste mode"></button></div></div>
               <div class="set-row toggle-field"><div class="desc">Sound cues<div class="help">A soft tone when recording starts and stops.</div></div><div class="control"><button type="button" class="toggle" id="set-sound-cues" role="switch" aria-checked="false" aria-label="Sound cues"></button></div></div>
+              <div class="set-row toggle-field"><div class="desc">Learn my words automatically<div class="help">When you fix a word Scribe typed, it remembers the fix — and names you say often are added too. Everything stays on this PC.</div></div><div class="control"><button type="button" class="toggle" id="set-learn" role="switch" aria-checked="false" aria-label="Learn my words automatically"></button></div></div>
             </div>
           </div>
 
@@ -830,7 +858,7 @@
     $$('.nav-item').forEach(el => el.addEventListener('click', () => showPage(el.dataset.page)));
 
     // --- Formatting helpers ----------------------------------
-    const plural = (n, word) => `${word}${n === 1 ? '' : 's'}`;
+    const plural = (n, word, many) => (n === 1 ? word : (many || `${word}s`));
     function fmtInt(n) { return Math.round(n).toLocaleString(); }
     function formatBigNumber(n) {
       // Round first, then pick the unit: 999,950 is "1M", never "1000K".
@@ -1345,10 +1373,40 @@
       }
     }
 
+    // What Scribe learned by itself, and how often the Dictionary spelled a
+    // word right for you this month (each history entry counts its `fixed`).
+    function renderLearnedInsight(E) {
+      const learned = learnedWords();
+      const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+      let month = 0, all = 0;
+      for (const e of E) {
+        const n = Number(e.fixed) || 0; all += n;
+        if (n && new Date(e.timestamp) >= monthStart) month += n;
+      }
+      if (!learned.length && !all) {
+        metricCard('#ins-learned', 'Words learned', '—', '',
+          'When you fix a word right after Scribe types it, or say a name often, Scribe remembers it — and it shows up here.');
+        return;
+      }
+      const fromFix = learned.filter(x => x.info.from === 'fix').length;
+      const desc = month
+        ? `Your Dictionary spelled ${fmtInt(month)} ${plural(month, 'word')} right for you this month — no fixing by hand.`
+        : `${fromFix} from words you fixed, ${learned.length - fromFix} from names you say often.`;
+      const card = metricCard('#ins-learned', 'Words learned', fmtInt(learned.length), plural(learned.length, 'word'), desc);
+      if (learned.length) {
+        const chips = document.createElement('div'); chips.className = 'chips learned-chips';
+        for (const { word } of learned.slice(0, 12)) {
+          const c = document.createElement('span'); c.className = 'chip'; c.textContent = word; chips.appendChild(c);
+        }
+        card.appendChild(chips);
+      }
+      if (all > month) foot(card, `${fmtInt(all)} ${plural(all, 'word')} fixed by your Dictionary since you started.`);
+    }
+
     function renderInsights() {
       const E = state.entries;
       renderSummary(E); renderPace(E); renderSpeed(E); renderPolish(E);
-      renderHours(E); renderApps(E); renderConsistency(E); renderTopWords(E);
+      renderHours(E); renderApps(E); renderConsistency(E); renderLearnedInsight(E); renderTopWords(E);
     }
 
     // ===== USAGE (Settings) ===================================
@@ -1475,11 +1533,47 @@
     function addCorrection(wrong, right) { const a = vocabApi(); if (a && wrong && right) vocabOp(a.add_vocab_correction(wrong, right), `Fixed “${wrong}” → “${right}” — live from your next dictation`); }
     function removeTerm(term)          { const a = vocabApi(); if (a) vocabOp(a.remove_vocab_term(term), `Removed “${term}”`); }
     function removeCorrection(wrong)   { const a = vocabApi(); if (a) vocabOp(a.remove_vocab_correction(wrong), `Removed the fix for “${wrong}”`); }
+    function removeLearned(word)       { const a = vocabApi(); if (a) vocabOp(a.remove_learned_word(word), `Removed “${word}” — Scribe won’t learn it again`); }
+
+    // The words Scribe learned by itself, newest first: each term with a
+    // `learned` record says where it came from ("fix" or "said").
+    function learnedWords() {
+      const L = (state.vocab && state.vocab.learned) || {};
+      return ((state.vocab && state.vocab.terms) || [])
+        .filter(t => L[String(t).toLowerCase()])
+        .map(t => ({ word: t, info: L[String(t).toLowerCase()] }))
+        .sort((a, b) => String(b.info.at || '').localeCompare(String(a.info.at || '')));
+    }
+    function isLearnedFix(wrong, right) {
+      const r = ((state.vocab && state.vocab.learned) || {})[String(right).toLowerCase()];
+      return !!(r && r.wrong && r.wrong.toLowerCase() === String(wrong).toLowerCase());
+    }
 
     function renderDictionary() {
-      const terms = state.vocab.terms || [], corrections = state.vocab.corrections || [];
+      const L = state.vocab.learned || {};
+      const learned = learnedWords();
+      $('#dict-sub').textContent = state.config.learn_words === false
+        ? 'Learning is off — Scribe only uses the words below. Turn it on in Settings → Dictation.'
+        : 'Scribe learns your words as you go — the ones you fix after it types them, and the names you say often. Nothing to keep up with.';
+      $('#dict-learned-count').textContent = learned.length ? `${learned.length} ${plural(learned.length, 'word')}` : '';
+      const lHost = $('#dict-learned-host'); lHost.innerHTML = '';
+      if (!learned.length) lHost.innerHTML = '<div class="empty">Nothing yet. Fix a word right after Scribe types it, or say a name a few times, and it shows up here.</div>';
+      else for (const { word, info } of learned) {
+        const row = document.createElement('div'); row.className = 'learned-row';
+        row.innerHTML = '<span class="word"></span><span class="how"></span><span class="when"></span><button class="corr-x" title="Remove">✕</button>';
+        row.querySelector('.word').textContent = word;
+        row.querySelector('.how').textContent = info.from === 'fix' ? `You fixed “${info.wrong || '…'}”` : 'You say it often';
+        const at = new Date(info.at);
+        row.querySelector('.when').textContent = isNaN(at) ? '' : at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        const x = row.querySelector('.corr-x'); x.setAttribute('aria-label', `Remove ${word}`);
+        x.addEventListener('click', () => removeLearned(word));
+        lHost.appendChild(row);
+      }
+      // Below: the words and fixes you added yourself.
+      const terms = (state.vocab.terms || []).filter(t => !L[String(t).toLowerCase()]);
+      const corrections = (state.vocab.corrections || []).filter(([w, r]) => !isLearnedFix(w, r));
       $('#dict-terms-count').textContent = `${terms.length} ${plural(terms.length, 'word')}`;
-      $('#dict-corr-count').textContent = `${corrections.length} ${plural(corrections.length, 'correction')}`;
+      $('#dict-corr-count').textContent = `${corrections.length} ${plural(corrections.length, 'fix', 'fixes')}`;
 
       const tHost = $('#dict-terms-host'); tHost.innerHTML = ''; tHost.className = terms.length ? 'chips' : '';
       if (!terms.length) tHost.innerHTML = '<div class="card empty">Nothing here yet — add a word above.</div>';
@@ -1492,7 +1586,7 @@
       }
 
       const cHost = $('#dict-corr-host'); cHost.innerHTML = '';
-      if (!corrections.length) cHost.innerHTML = '<div class="empty">Nothing here yet — Scribe adds fixes here as it learns them.</div>';
+      if (!corrections.length) cHost.innerHTML = '<div class="empty">Nothing here — Scribe learns fixes by itself. Add one above if you like.</div>';
       else for (const [wrong, right] of corrections) {
         const row = document.createElement('div'); row.className = 'corr-row';
         row.innerHTML = `<span class="wrong"></span><span class="arrow">→</span><span class="right"></span><button class="corr-x" title="Remove">✕</button>`;
@@ -1537,6 +1631,7 @@
       setToggle('set-trailing', c.add_trailing_space);
       setToggle('set-paste', c.paste_mode);
       setToggle('set-sound-cues', c.sound_cues !== false);
+      setToggle('set-learn', c.learn_words !== false);
       setToggle('set-cloud', c.use_cloud);
       setToggle('set-pipeline', c.pipeline_cloud !== false);
       setToggle('set-polish', c.polish !== false);
@@ -1653,6 +1748,7 @@
         model_size: $('#set-model').value, mic_device: mic === '(system default)' ? null : mic,
         add_trailing_space: toggleValue('set-trailing'), paste_mode: toggleValue('set-paste'),
         sound_cues: toggleValue('set-sound-cues'), use_cloud: cloud,
+        learn_words: toggleValue('set-learn'),
         cloud_provider: $('#set-provider').value,
         pipeline_cloud: toggleValue('set-pipeline'),
         polish: toggleValue('set-polish'), polish_style: state.polishStyle,
@@ -1771,6 +1867,15 @@
     $('#dict-add-term').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); $('#dict-add-term-btn').click(); }
     });
+    // "When Scribe types … write this instead": a fix by hand.
+    $('#dict-fix-add').addEventListener('click', () => {
+      const wrong = $('#dict-fix-wrong').value.trim(), right = $('#dict-fix-right').value.trim();
+      if (!wrong || !right) return;
+      addCorrection(wrong, right); $('#dict-fix-wrong').value = ''; $('#dict-fix-right').value = '';
+    });
+    for (const id of ['#dict-fix-wrong', '#dict-fix-right']) {
+      $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#dict-fix-add').click(); } });
+    }
 
     function copyToClipboard(text) {
       if (!text) return;
@@ -2076,6 +2181,11 @@
         // so it sends exactly what's missing.
         const update = await window.pywebview.api.poll_updates(state.logSig, state.historyGen, state.entries.length);
         if (update && update.log_sig) state.logSig = update.log_sig;
+        // Scribe learned a word (maybe a minute after the dictation): show it.
+        if (update && update.vocab) {
+          state.vocab = update.vocab; renderDictionary();
+          if (!$('#page-insights').hidden) renderInsights();
+        }
         if (update && update.changed) {
           // Usually just the new dictations; everything only if the
           // history file was rewritten (an undo, a hand edit).

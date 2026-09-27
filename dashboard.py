@@ -290,12 +290,24 @@ def _write_vocab_raw(raw):
 
 
 def read_vocab():
-    """Return {terms, corrections, dismissed} for the UI. Corrections arrive as
-    a dict in the file but the page wants ordered pairs (longest 'wrong' first,
-    matching app.py's apply_vocabulary() ordering), so we convert here."""
+    """Return {terms, corrections, dismissed, learned} for the UI. Corrections
+    arrive as a dict in the file but the page wants ordered pairs (longest
+    'wrong' first, matching app.py's apply_vocabulary() ordering), so we
+    convert here. `learned` says which words Scribe added by itself, and how."""
     raw = _read_vocab_raw()
     pairs = sorted(raw["corrections"].items(), key=lambda p: len(p[0]), reverse=True)
-    return {"terms": raw["terms"], "corrections": pairs, "dismissed": raw["dismissed"]}
+    return {"terms": raw["terms"], "corrections": pairs, "dismissed": raw["dismissed"],
+            "learned": raw.get("learned", {})}
+
+
+def _vocab_signature():
+    """(mtime, size) of vocabulary.json, or None - to notice a word the app
+    learned while the dashboard is open."""
+    try:
+        st = os.stat(VOCAB_FILE)
+    except OSError:
+        return None
+    return (st.st_mtime, st.st_size)
 
 
 def _local_timestamp(value):
@@ -349,6 +361,9 @@ def _clean_log_entry(e):
         out.pop("raw", None)
     if out.get("polished") is not True or "raw" not in out:
         out.pop("polished", None)            # "polished" means: here's what you said
+    fixed = out.get("fixed")                 # words the Dictionary corrected (Insights)
+    if isinstance(fixed, bool) or not isinstance(fixed, int) or fixed < 1:
+        out.pop("fixed", None)
     return out
 
 
@@ -1107,6 +1122,8 @@ class JsApi:
         self._setup_finished_at = None
         # The app icons this window's page already has (polls send only new ones).
         self._icons_sent = set()
+        # vocabulary.json as the page last got it (a word learned since is sent).
+        self._vocab_sig = None
 
     def _icons_for_page(self, entries, fresh=False):
         """The app icons the page doesn't have yet (all of them on a fresh
@@ -1130,9 +1147,8 @@ class JsApi:
             log_sig = None                    # couldn't read: the first poll retries
         snap = HISTORY.snapshot_since(None, None)
         entries = snap["entries"]
-        raw_vocab = _read_vocab_raw()
-        pairs = sorted(raw_vocab["corrections"].items(),
-                       key=lambda p: len(p[0]), reverse=True)
+        self._vocab_sig = _vocab_signature()
+        vocab = read_vocab()
         config = read_config()
         # An older version may have saved MME's truncated mic name; show (and
         # later save) the full name it resolves to.
@@ -1146,8 +1162,7 @@ class JsApi:
             "app_version": VERSION,
             # First run: the page shows the welcome instead of the dashboard.
             "welcome": self.welcome,
-            "vocab":   {"terms": raw_vocab["terms"], "corrections": pairs,
-                        "dismissed": raw_vocab["dismissed"]},
+            "vocab":   vocab,
             "choices": {
                 "hotkeys": HOTKEY_CHOICES,
                 "models":  MODEL_CHOICES,
@@ -1184,11 +1199,18 @@ class JsApi:
         couldn't be read just now, nothing changes and the page's signature
         is handed back, so the next poll tries again."""
         sig = _log_signature()
+        # Scribe learns words by itself - up to a minute after a dictation -
+        # so the Dictionary is checked on its own, one stat() per poll.
+        extra = {}
+        vsig = _vocab_signature()
+        if vsig != self._vocab_sig:
+            self._vocab_sig = vsig
+            extra["vocab"] = read_vocab()
         if (isinstance(since, list) and len(since) == len(sig)
                 and all(float(a) == float(b) for a, b in zip(since, sig))):
-            return {"changed": False, "log_sig": sig}
+            return dict(extra, changed=False, log_sig=sig)
         if HISTORY.refresh()[0] == "unreadable":
-            return {"changed": False, "log_sig": since}
+            return dict(extra, changed=False, log_sig=since)
         snap = HISTORY.snapshot_since(gen, count)
         out = {
             "changed":   True,
@@ -1197,6 +1219,7 @@ class JsApi:
             "cloud":     summarize_cloud_usage(),
         }
         out.update(snap)
+        out.update(extra)
         return out
 
     def save_settings(self, payload):
@@ -1482,6 +1505,14 @@ class JsApi:
         self._save_vocab(raw)
         return self._vocab_state()
 
+    def remove_learned_word(self, word):
+        """"Learned for you" -> remove: the word, its fix, and its record go,
+        and it is never learned again (learning.forget)."""
+        raw = _read_vocab_raw()
+        if learning.forget(raw, word):
+            self._save_vocab(raw)
+        return self._vocab_state()
+
     def remove_vocab_correction(self, wrong):
         key = (wrong or "").strip().lower()
         raw = _read_vocab_raw()
@@ -1573,7 +1604,7 @@ PAGE_FUNCTIONS = (
     "get_elevenlabs_usage", "check_for_updates", "open_release_page", "install_update",
     "finish_setup", "get_setup_status", "retry_model", "read_clipboard_key",
     "mark_milestones_seen", "add_vocab_term", "add_vocab_correction",
-    "remove_vocab_term", "remove_vocab_correction",
+    "remove_vocab_term", "remove_vocab_correction", "remove_learned_word",
     "minimize_window", "toggle_maximize", "close_window",
     "get_window_position", "move_window",
 )
