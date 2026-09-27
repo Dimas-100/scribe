@@ -107,30 +107,6 @@ def _log(lines, mode="w"):
                                 "words": len(text.split()), "duration": 1.0}) + "\n")
 
 
-def test_suggestions_keep_the_users_spelling():
-    entries = [{"text": t} for t in ["I bet on Kalshi today.", "Kalshi odds moved.",
-                                     "check kalshi again", "Is Kalshi up?"]]
-    s = dashboard.suggest_vocabulary(entries, [], {}, [])
-    assert [x["word"] for x in s] == ["Kalshi"], s
-    print("PASS  a suggestion keeps its most common mid-sentence spelling.")
-
-
-def test_unicode_words_are_one_word():
-    entries = [{"text": "Call José now."}, {"text": "José said hi."}, {"text": "ask José"}]
-    s = dashboard.suggest_vocabulary(entries, [], {}, [])
-    assert "José" in [x["word"] for x in s], s
-    print("PASS  accented words stay whole.")
-
-
-def test_names_bypass_the_common_word_list():
-    assert "david" in dashboard.COMMON_WORDS
-    entries = [{"text": f"I met David {i} times."} for i in range(3)]
-    entries += [{"text": "the apple was red"}] * 3
-    words = [x["word"] for x in dashboard.suggest_vocabulary(entries, [], {}, [])]
-    assert "David" in words and "apple" not in words, words
-    print("PASS  mostly-capitalized common words (names) are suggested; everyday ones aren't.")
-
-
 def test_history_cache_appends_incrementally():
     _log(["first entry"])
     cache = dashboard.HistoryCache(os.path.join(TMP, "dictation_log.jsonl"))
@@ -162,17 +138,6 @@ def test_history_cache_detects_rewrite():
     print("PASS  a rewritten history is re-read in full, never half-parsed.")
 
 
-def test_history_cache_suggestions_follow_new_entries():
-    _log([])
-    cache = dashboard.HistoryCache(os.path.join(TMP, "dictation_log.jsonl"))
-    cache.refresh()
-    assert cache.suggestions([], {}, []) == []
-    _log(["Ping Vercel now", "Vercel deploys", "on Vercel again"], mode="a")
-    cache.refresh()
-    assert [x["word"] for x in cache.suggestions([], {}, [])] == ["Vercel"]
-    print("PASS  suggestions update from the incremental index.")
-
-
 def test_poll_sends_only_new_entries():
     _log(["alpha one"])
     dashboard.HISTORY = dashboard.HistoryCache(os.path.join(TMP, "dictation_log.jsonl"))
@@ -186,8 +151,8 @@ def test_poll_sends_only_new_entries():
         nxt = api.poll_updates(first["log_sig"], gen, count)
     assert nxt["changed"] and not nxt["reset"], nxt
     assert [e["text"] for e in nxt["appended"]] == ["beta two"]
-    assert "entries" not in nxt and isinstance(nxt["suggestions"], list)
-    print("PASS  a poll sends only the new dictations (and fresh suggestions).")
+    assert "entries" not in nxt
+    print("PASS  a poll sends only the new dictations.")
 
 
 def test_add_term_reports_added_updated_exists():
@@ -292,10 +257,11 @@ def test_other_calls_cannot_swallow_a_new_dictation():
         api.add_vocab_term("Vercel")               # ...and a vocab call reads the log first
     with mock.patch.object(dashboard, "build_app_icons", return_value={}):
         assert page.poll() == ["one", "two", "three"]
-    # An undo rewrites the file; a dismiss reads it before the next poll.
+    # An undo rewrites the file; a vocabulary edit reads it before the next poll.
     storage.atomic_write_text(os.path.join(TMP, "dictation_log.jsonl"), "")
     _log(["one"], mode="a")
-    api.dismiss_suggestion("whatever")
+    with mock.patch.object(dashboard.instance, "send", return_value=True):
+        api.remove_vocab_term("whatever")
     with mock.patch.object(dashboard, "build_app_icons", return_value={}):
         assert page.poll() == ["one"]
     print("PASS  the page always ends up with exactly the file's dictations.")
@@ -324,18 +290,6 @@ def test_a_failed_read_changes_nothing_and_is_retried():
         assert page.poll() == ["solo"]
     assert storage.read_jsonl_from(os.path.join(TMP, "missing.jsonl"), 0) == ([], 0)
     print("PASS  a failed read leaves everything as it was and is tried again.")
-
-
-def test_calendar_and_language_words_are_not_names():
-    entries = [{"text": "See you on Monday at noon."}, {"text": "It ships next Friday."},
-               {"text": "We met on Monday again."}, {"text": "Friday works for me."},
-               {"text": "back in January then."}, {"text": "since January now."},
-               {"text": "my English teacher said"}, {"text": "in English please"},
-               {"text": "I met David 1 time."}, {"text": "I met David 2 times."}]
-    words = [x["word"] for x in dashboard.suggest_vocabulary(entries * 2, [], {}, [])]
-    assert not {"Monday", "Friday", "January", "English"} & set(words), words
-    assert "David" in words, words
-    print("PASS  weekdays, months and languages aren't suggested as names; people are.")
 
 
 def test_cycle_start():
@@ -398,14 +352,6 @@ def test_page_has_the_polish_switch():
     print("PASS  Settings has the AI polish switch, and it is saved.")
 
 
-def test_a_spelling_tie_goes_to_the_capitalized_form():
-    entries = [{"text": t} for t in ["we met Zeno there", "we met zeno again",
-                                     "ask Zeno now", "ask zeno later"]]
-    s = dashboard.suggest_vocabulary(entries * 2, [], {}, [])
-    assert [x["word"] for x in s] == ["Zeno"], s
-    print("PASS  a spelling tie goes to the Capitalized form.")
-
-
 def test_a_correction_updates_a_terms_spelling():
     storage.save_vocab({"terms": ["kalshi"], "corrections": {}})
     dashboard.JsApi().add_vocab_correction("cal she", "Kalshi")
@@ -455,7 +401,6 @@ def test_a_same_size_edit_is_noticed():
 def test_page_leftovers():
     page = open(os.path.join(ROOT, "dashboard.html"), encoding="utf-8").read()
     assert "function butClause(" in page, "D4: 'Saved - but your...'"
-    assert "state.pendingSuggestions = null; renderDictionary()" in page, "D5"
     assert "restoreHistoryFocus(" in page, "D6"
     assert "$('#set-ekey-field').hidden" in page.split("for (const [service, row] of Object.entries(KEY_ROWS))")[2], "D7"
     print("PASS  the page's leftovers are in (checked live in Chrome too).")
@@ -638,12 +583,8 @@ if __name__ == "__main__":
     test_bad_log_lines_are_skipped()
     test_initial_data_shape()
     test_webview2_detection_returns_bool()
-    test_suggestions_keep_the_users_spelling()
-    test_unicode_words_are_one_word()
-    test_names_bypass_the_common_word_list()
     test_history_cache_appends_incrementally()
     test_history_cache_detects_rewrite()
-    test_history_cache_suggestions_follow_new_entries()
     test_poll_sends_only_new_entries()
     test_add_term_reports_added_updated_exists()
     test_page_functions_cover_the_page_and_nothing_else()
@@ -652,12 +593,10 @@ if __name__ == "__main__":
     test_icon_query_gives_up_on_a_hung_window()
     test_other_calls_cannot_swallow_a_new_dictation()
     test_a_failed_read_changes_nothing_and_is_retried()
-    test_calendar_and_language_words_are_not_names()
     test_cycle_start()
     test_usage_meter_numbers()
     test_page_uses_the_elevenlabs_functions()
     test_page_has_the_polish_switch()
-    test_a_spelling_tie_goes_to_the_capitalized_form()
     test_a_correction_updates_a_terms_spelling()
     test_polls_send_only_new_app_icons()
     test_a_same_size_edit_is_noticed()

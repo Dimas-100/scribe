@@ -313,20 +313,6 @@
     .dict-section-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
     .dict-section-header h3 { font-size: 13.5px; font-weight: 600; }
     .caption { font-size: 12.5px; color: var(--text-3); }
-    .suggest-list { display: flex; flex-direction: column; }
-    .suggest-card { padding: 14px 16px; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
-    .suggest-card:first-child { border-top: 0; }
-    .suggest-main { flex: 1; min-width: 220px; }
-    .suggest-word { display: flex; align-items: baseline; gap: 10px; }
-    .suggest-word .sw { font-weight: 600; font-size: 14.5px; }
-    .suggest-word .sw-count { font-size: 12px; color: var(--text-3); }
-    .suggest-sample { font-size: 12.5px; color: var(--text-2); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .suggest-actions, .suggest-fix { display: flex; gap: 6px; align-items: center; }
-    .suggest-fix { width: 100%; }
-    .suggest-fix input { flex: 1; }
-    .sg-btn { height: 28px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--border-strong); background: transparent; font-size: 12.5px; font-weight: 500; color: var(--text); transition: background 120ms; }
-    .sg-btn:hover { background: var(--hover); }
-    .sg-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
     .add-row { display: flex; gap: 8px; margin-bottom: 12px; }
     .add-row input { flex: 1; }
     .chips { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -667,11 +653,6 @@
         <h1>Dictionary</h1>
         <p class="page-sub">Teach Scribe your names and jargon. Changes apply from your next dictation.</p>
 
-        <div class="dict-section" id="dict-suggest-section" hidden>
-          <div class="dict-section-header"><h3>Suggestions</h3><span class="caption" id="dict-suggest-count"></span></div>
-          <div id="dict-suggest-host" class="card suggest-list"></div>
-        </div>
-
         <div class="dict-section">
           <div class="dict-section-header"><h3>Your words</h3><span class="caption" id="dict-terms-count">0 words</span></div>
           <div class="add-row">
@@ -798,7 +779,6 @@
       vocab: { terms: [], corrections: [], dismissed: [] },
       choices: { hotkeys: [], models: [], mics: [] },
       appIcons: {}, cloud: null, logSig: null,
-      suggestions: [],
       keyAction: {},         // per service: null / 'replace' / 'remove'
       eleven: null,          // ElevenLabs' month (get_elevenlabs_usage), or null
       elevenTimer: null,
@@ -1476,7 +1456,7 @@
     async function vocabOp(promise, toastMsg) {
       try {
         const res = await promise;
-        if (res && res.vocab) { state.vocab = res.vocab; state.suggestions = res.suggestions || []; state.pendingSuggestions = null; renderDictionary(); }
+        if (res && res.vocab) { state.vocab = res.vocab; renderDictionary(); }
         if (toastMsg) showToast(toastMsg);
       } catch (e) { console.error('vocab op failed:', e); showToast('Could not save — please try again', 3200, 'warn'); }
     }
@@ -1484,7 +1464,7 @@
       const a = vocabApi(); if (!a || !term) return;
       try {
         const res = await a.add_vocab_term(term);
-        if (res && res.vocab) { state.vocab = res.vocab; state.suggestions = res.suggestions || []; state.pendingSuggestions = null; renderDictionary(); }
+        if (res && res.vocab) { state.vocab = res.vocab; renderDictionary(); }
         // Say what really happened: a new word, a new spelling, or nothing to do.
         const msg = res && res.result === 'updated' ? `Updated to “${term}” — Scribe uses this spelling from your next dictation`
                   : res && res.result === 'exists' ? `“${term}” is already in your words`
@@ -1495,84 +1475,14 @@
     function addCorrection(wrong, right) { const a = vocabApi(); if (a && wrong && right) vocabOp(a.add_vocab_correction(wrong, right), `Fixed “${wrong}” → “${right}” — live from your next dictation`); }
     function removeTerm(term)          { const a = vocabApi(); if (a) vocabOp(a.remove_vocab_term(term), `Removed “${term}”`); }
     function removeCorrection(wrong)   { const a = vocabApi(); if (a) vocabOp(a.remove_vocab_correction(wrong), `Removed the fix for “${wrong}”`); }
-    function dismissSuggestion(word)   { const a = vocabApi(); if (a) vocabOp(a.dismiss_suggestion(word), null); }
-
-    // A poll can bring new suggestions while you're typing a fix in a card;
-    // re-rendering then would pull the card out from under your cursor. So
-    // new suggestions wait until no fix box is open.
-    function suggestionEditing() { return !!document.querySelector('#dict-suggest-host .suggest-fix:not([hidden])'); }
-    function applySuggestions(list) {
-      const next = JSON.stringify(list || []);
-      if (next === state.suggestionsKey) { state.pendingSuggestions = null; return; }
-      state.pendingSuggestions = list || [];
-      if (suggestionEditing()) return;
-      state.suggestions = state.pendingSuggestions; state.pendingSuggestions = null;
-      renderSuggestions();
-    }
-
-    function renderSuggestions() {
-      const section = $('#dict-suggest-section'), host = $('#dict-suggest-host');
-      const sugs = state.suggestions || [];
-      state.suggestionsKey = JSON.stringify(sugs);
-      if (!sugs.length) { section.hidden = true; return; }
-      section.hidden = false;
-      $('#dict-suggest-count').textContent = `${sugs.length} to review`;
-      host.innerHTML = '';
-      for (const s of sugs) {
-        const card = document.createElement('div'); card.className = 'suggest-card';
-        card.innerHTML = `
-          <div class="suggest-main">
-            <div class="suggest-word"><span class="sw"></span><span class="sw-count"></span></div>
-            <div class="suggest-sample"></div>
-          </div>
-          <div class="suggest-actions">
-            <button class="sg-btn sg-fix">Should be…</button>
-            <button class="sg-btn sg-add">I say it that way</button>
-            <button class="sg-btn sg-dismiss">Dismiss</button>
-          </div>
-          <div class="suggest-fix" hidden>
-            <input type="text" spellcheck="false" />
-            <button class="sg-btn primary sg-fix-save">Save fix</button>
-            <button class="sg-btn sg-fix-cancel">Cancel</button>
-          </div>`;
-        card.querySelector('.sw').textContent = s.word;
-        card.querySelector('.sw-count').textContent = `said ${s.count} ${plural(s.count, 'time')}`;
-        card.querySelector('.suggest-sample').textContent = s.sample || '';
-        const fix = card.querySelector('.suggest-fix'), input = fix.querySelector('input');
-        const actions = card.querySelector('.suggest-actions');
-        const closeFix = () => {
-          fix.hidden = true; actions.hidden = false;
-          if (state.pendingSuggestions) applySuggestions(state.pendingSuggestions);
-        };
-        card.querySelector('.sg-fix').addEventListener('click', () => {
-          fix.hidden = false; actions.hidden = true; input.value = s.word; input.focus(); input.select();
-        });
-        card.querySelector('.sg-fix-cancel').addEventListener('click', closeFix);
-        card.querySelector('.sg-fix-save').addEventListener('click', () => {
-          const v = input.value.trim(); if (!v) return;
-          // Same letters, same case → it was heard right: just a term.
-          // Anything else (even only the capitals) → a correction, so the
-          // output is fixed, not only hinted to Whisper.
-          if (v === s.word) addTerm(v); else addCorrection(s.word, v);
-        });
-        input.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') { e.preventDefault(); card.querySelector('.sg-fix-save').click(); }
-          else if (e.key === 'Escape') closeFix();
-        });
-        card.querySelector('.sg-add').addEventListener('click', () => addTerm(s.word));
-        card.querySelector('.sg-dismiss').addEventListener('click', () => dismissSuggestion(s.word));
-        host.appendChild(card);
-      }
-    }
 
     function renderDictionary() {
-      renderSuggestions();
       const terms = state.vocab.terms || [], corrections = state.vocab.corrections || [];
       $('#dict-terms-count').textContent = `${terms.length} ${plural(terms.length, 'word')}`;
       $('#dict-corr-count').textContent = `${corrections.length} ${plural(corrections.length, 'correction')}`;
 
       const tHost = $('#dict-terms-host'); tHost.innerHTML = ''; tHost.className = terms.length ? 'chips' : '';
-      if (!terms.length) tHost.innerHTML = '<div class="card empty">Nothing here yet — add a word above or accept a suggestion.</div>';
+      if (!terms.length) tHost.innerHTML = '<div class="card empty">Nothing here yet — add a word above.</div>';
       else for (const t of terms) {
         const chip = document.createElement('span'); chip.className = 'chip';
         const lbl = document.createElement('span'); lbl.className = 'chip-label'; lbl.textContent = t;
@@ -1582,7 +1492,7 @@
       }
 
       const cHost = $('#dict-corr-host'); cHost.innerHTML = '';
-      if (!corrections.length) cHost.innerHTML = '<div class="empty">Nothing here yet — teach Scribe a fix from a suggestion above.</div>';
+      if (!corrections.length) cHost.innerHTML = '<div class="empty">Nothing here yet — Scribe adds fixes here as it learns them.</div>';
       else for (const [wrong, right] of corrections) {
         const row = document.createElement('div'); row.className = 'corr-row';
         row.innerHTML = `<span class="wrong"></span><span class="arrow">→</span><span class="right"></span><button class="corr-x" title="Remove">✕</button>`;
@@ -2125,7 +2035,6 @@
         state.choices = data.choices || { hotkeys: [], models: [], mics: [] };
         state.appIcons = data.app_icons || {}; state.cloud = data.cloud || null; state.logSig = data.log_sig || null;
         state.historyGen = data.history_gen;
-        state.suggestions = data.suggestions || [];
         state.appVersion = data.app_version || '';
         applyTheme(state.config.theme);
         // First run: the welcome takes the whole window until it's done.
@@ -2180,7 +2089,6 @@
           // rebuild History under a keyboard user's focus).
           if (entriesChanged) { renderHome(); if (!$('#page-insights').hidden) renderInsights(); }
           renderCloudUsage();
-          if (update.suggestions) applySuggestions(update.suggestions);
         }
       } catch (e) { console.error('poll_updates failed:', e); }
     }

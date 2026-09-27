@@ -53,6 +53,7 @@ import devices
 import elevenlabs_stream
 import instance
 import keystore
+import learning
 import storage
 import updates
 from version import VERSION
@@ -64,14 +65,6 @@ try:
     from PIL import Image
 except ImportError:
     Image = None
-
-# Bundled common-English-word denylist for the vocabulary suggestion engine.
-# Soft import: if the data module is somehow missing, suggestions still work,
-# they just skip the common-word filter (noisier, but functional).
-try:
-    from common_words import COMMON_WORDS
-except Exception:
-    COMMON_WORDS = frozenset()
 
 
 # =============================================================================
@@ -280,30 +273,11 @@ def check_groq_key(key):
     return {"status": "ok", "message": "Key works."}
 
 
-# --- Vocabulary suggestion engine tuning ---------------------------------
-MIN_SUGGESTION_COUNT = 3      # a word must be said at least this many times
-MIN_SUGGESTION_LEN   = 3      # ...and be at least this many letters
-MAX_SUGGESTIONS      = 15     # cap the list so it stays scannable
-CAP_BOOST            = 1.6    # rank multiplier for ever-capitalized words
-
-# Everyday words to keep out of suggestions, on top of COMMON_WORDS. Mirrors
-# the dashboard's client-side STOP_WORDS (these carry apostrophes, which the
-# common-word list does not).
-SUGGEST_STOP_WORDS = frozenset((
-    "the a an and or but of in on at to for with by from is am are was were be "
-    "been being have has had do does did will would could should can may this that "
-    "these those i you he she it we they my your his her its our their me him them "
-    "us what which who how when where why as if so than then just like get got also "
-    "really very more most some any all no not about into out now here there too only "
-    "own same such i'm i've i'll i'd it's that's don't doesn't didn't won't can't "
-    "you're we're they're isn't").split())
-
-
 def _read_vocab_raw():
-    """The validated vocabulary as {terms, corrections, dismissed}. The single
-    source of truth for both the read-modify-write bridge methods and the
-    suggestion engine, so an external hand-edit is always re-read before we
-    write back over it."""
+    """The validated vocabulary as {terms, corrections, dismissed, learned}.
+    The single source of truth for the read-modify-write bridge methods, so
+    an external hand-edit (or a word Scribe just learned) is always re-read
+    before we write back over it."""
     vocab, notices = storage.load_vocab()
     _remember(notices)
     return vocab
@@ -322,133 +296,6 @@ def read_vocab():
     raw = _read_vocab_raw()
     pairs = sorted(raw["corrections"].items(), key=lambda p: len(p[0]), reverse=True)
     return {"terms": raw["terms"], "corrections": pairs, "dismissed": raw["dismissed"]}
-
-
-def _at_sentence_start(text, start):
-    """True if the token at index `start` begins a sentence - i.e. nothing
-    precedes it, or the previous non-space char ends a sentence. Used to ignore
-    Whisper's automatic sentence-initial capitals when scoring proper nouns."""
-    before = text[:start].rstrip()
-    return (not before) or before[-1] in ".!?"
-
-
-def _sample_around(text, start, end, width=46):
-    """A short readable snippet around a word, for context in the suggestion
-    card ('…deploy it to versel tonight and…')."""
-    a = max(0, start - width)
-    b = min(len(text), end + width)
-    snippet = text[a:b].strip()
-    if a > 0:
-        snippet = "…" + snippet
-    if b < len(text):
-        snippet = snippet + "…"
-    return snippet
-
-
-# A word: letters of ANY language ("José", "naïve"), with inner apostrophes
-# ("don't"). Digits and underscores are not letters.
-WORD_RE = re.compile(r"[^\W\d_]+(?:'[^\W\d_]+)*")
-
-# A common word that is capitalized in at least this share of its
-# mid-sentence uses (and at least NAME_MIN_MID times) is treated as a name -
-# "David", "Nvidia" - and may be suggested despite COMMON_WORDS.
-NAME_CAP_SHARE = 0.6
-NAME_MIN_MID = 2
-
-# Always Capitalized, but not the names Scribe is looking for - Whisper
-# spells them right, so suggesting them is just noise.
-NOT_NAMES = frozenset((
-    "monday tuesday wednesday thursday friday saturday sunday "
-    "january february march april may june july august september october "
-    "november december "
-    "english spanish french german italian portuguese chinese japanese korean "
-    "russian arabic hindi dutch greek american british canadian mexican "
-    "european african asian christmas easter").split())
-
-
-class SuggestionIndex:
-    """
-    Running word statistics over the dictation history, for the Dictionary
-    page's suggestions. add() takes new entries only, so a new dictation
-    costs a few microseconds instead of a rescan of the whole history.
-
-    A word is a candidate when it is said often, isn't an everyday English
-    word (COMMON_WORDS / stop-words - unless it is almost always Capitalized
-    mid-sentence, i.e. a name), isn't already a term or a correction's
-    wrong/right side, and hasn't been dismissed. Ranked by frequency, with a
-    boost for words seen Capitalized mid-sentence (a proper-noun tell).
-    """
-
-    def __init__(self):
-        self.counts = {}         # word (lowercase) -> times said
-        self.samples = {}        # word -> a snippet of its first use
-        self.mid_total = {}      # word -> uses not at a sentence start
-        self.mid_capped = {}     # word -> ...of which Capitalized
-        self.spellings = {}      # word -> {spelling: count} mid-sentence
-        self.any_spelling = {}   # word -> {spelling: count} anywhere
-
-    def add(self, entries):
-        for e in entries:
-            text = e.get("text", "") or ""
-            for m in WORD_RE.finditer(text):
-                tok = m.group()
-                w = tok.lower()
-                self.counts[w] = self.counts.get(w, 0) + 1
-                if w not in self.samples:
-                    self.samples[w] = _sample_around(text, m.start(), m.end())
-                anyd = self.any_spelling.setdefault(w, {})
-                anyd[tok] = anyd.get(tok, 0) + 1
-                if not _at_sentence_start(text, m.start()):
-                    self.mid_total[w] = self.mid_total.get(w, 0) + 1
-                    if tok[0].isupper():
-                        self.mid_capped[w] = self.mid_capped.get(w, 0) + 1
-                    mid = self.spellings.setdefault(w, {})
-                    mid[tok] = mid.get(tok, 0) + 1
-
-    def _display(self, w):
-        """The spelling to show: the most common one mid-sentence (sentence-
-        initial capitals say nothing), else the most common anywhere - and on
-        a tie, the Capitalized one (a name typed both ways is still a name)."""
-        pool = self.spellings.get(w) or self.any_spelling.get(w) or {w: 1}
-        return max(pool.items(), key=lambda kv: (kv[1], kv[0][:1].isupper(), kv[0]))[0]
-
-    def _looks_like_a_name(self, w):
-        if w in NOT_NAMES:
-            return False
-        mid = self.mid_total.get(w, 0)
-        return mid >= NAME_MIN_MID and self.mid_capped.get(w, 0) / mid >= NAME_CAP_SHARE
-
-    def suggest(self, terms, corrections, dismissed):
-        """Up to MAX_SUGGESTIONS {word, count, sample}, best first."""
-        known = {str(t).strip().lower() for t in terms}
-        for wrong, right in corrections.items():
-            known.add(str(wrong).strip().lower())
-            known.add(str(right).strip().lower())
-        dismissed_set = {str(d).strip().lower() for d in dismissed}
-        candidates = []
-        for w, c in self.counts.items():
-            if c < MIN_SUGGESTION_COUNT or len(w) < MIN_SUGGESTION_LEN:
-                continue
-            if w in known or w in dismissed_set:
-                continue
-            bare = w.replace("'", "")
-            if w in SUGGEST_STOP_WORDS or bare in SUGGEST_STOP_WORDS:
-                continue
-            if (w in COMMON_WORDS or bare in COMMON_WORDS) and not self._looks_like_a_name(w):
-                continue
-            score = c * (CAP_BOOST if self.mid_capped.get(w) else 1.0)
-            candidates.append((score, c, w))
-        candidates.sort(reverse=True)
-        return [{"word": self._display(w), "count": c, "sample": self.samples.get(w, "")}
-                for _score, c, w in candidates[:MAX_SUGGESTIONS]]
-
-
-def suggest_vocabulary(entries, terms, corrections, dismissed):
-    """Suggestions for a list of entries (builds a fresh index). The live
-    dashboard uses HISTORY's running index instead."""
-    index = SuggestionIndex()
-    index.add(entries)
-    return index.suggest(terms, corrections, dismissed)
 
 
 def _local_timestamp(value):
@@ -512,8 +359,7 @@ class HistoryCache:
     last bytes before the offset. New dictations are appended, so normally
     only the new lines are read. If the file shrank, was replaced (an undo
     rewrites it) or the bytes before the offset changed, it re-reads it all -
-    when in doubt, a full read, never a guess. It also keeps the suggestion
-    index up to date, so suggestions refresh without rescanning.
+    when in doubt, a full read, never a guess.
 
     Several bridge calls refresh the cache (polls, vocabulary edits), so the
     page is never told "what changed since the last refresh" - it says what
@@ -532,7 +378,6 @@ class HistoryCache:
     def _reset_state(self):
         self.gen += 1
         self.entries = []
-        self.index = SuggestionIndex()
         self._offset = 0
         self._ino = None
         self._tail = b""
@@ -551,7 +396,6 @@ class HistoryCache:
     def _take(self, raw, new_offset, st):
         new = [c for c in map(_clean_log_entry, raw) if c]
         self.entries.extend(new)
-        self.index.add(new)
         self._offset = new_offset
         self._ino = st.st_ino
         # None if it can't be read now: the next check then can't match, and
@@ -615,10 +459,6 @@ class HistoryCache:
     def entries_copy(self):
         with self._lock:
             return list(self.entries)
-
-    def suggestions(self, terms, corrections, dismissed):
-        with self._lock:
-            return self.index.suggest(terms, corrections, dismissed)
 
 
 HISTORY = HistoryCache(LOG_FILE)
@@ -1320,10 +1160,6 @@ class JsApi:
             # Groq free-tier usage counters (today vs. quota) for the
             # Insights "Cloud usage" panel.
             "cloud":   summarize_cloud_usage(),
-            # Distinctive words from the history the catalog doesn't cover
-            # yet - the dashboard's Dictionary page suggests these.
-            "suggestions": HISTORY.suggestions(
-                raw_vocab["terms"], raw_vocab["corrections"], raw_vocab["dismissed"]),
             # Baseline signature for the poll loop. The page sends this
             # value back to poll_updates so the bridge can short-circuit
             # the no-change case with a single stat().
@@ -1344,7 +1180,7 @@ class JsApi:
         gets exactly what it's missing - it tells us which history
         generation it has (`gen`) and how many entries (`count`): "appended"
         (just the new ones) or "entries" with reset=True (the file was
-        rewritten) - plus fresh suggestions and cloud usage. If the history
+        rewritten) - plus cloud usage. If the history
         couldn't be read just now, nothing changes and the page's signature
         is handed back, so the next poll tries again."""
         sig = _log_signature()
@@ -1354,14 +1190,11 @@ class JsApi:
         if HISTORY.refresh()[0] == "unreadable":
             return {"changed": False, "log_sig": since}
         snap = HISTORY.snapshot_since(gen, count)
-        raw = _read_vocab_raw()
         out = {
             "changed":   True,
             "log_sig":   sig,
             "app_icons": self._icons_for_page(HISTORY.entries_copy()),
             "cloud":     summarize_cloud_usage(),
-            "suggestions": HISTORY.suggestions(raw["terms"], raw["corrections"],
-                                               raw["dismissed"]),
         }
         out.update(snap)
         return out
@@ -1590,21 +1423,12 @@ class JsApi:
     # The Dictionary page writes the catalog through these. Each does a
     # read-modify-write of vocabulary.json (re-reading first so a manual
     # edit is never clobbered) and pings app.py to reload it live, then
-    # returns the fresh {vocab, suggestions} so the page re-renders without
-    # a refetch.
+    # returns the fresh {vocab} so the page re-renders without a refetch.
 
     def _vocab_state(self):
-        """Current catalog + fresh suggestions, for the page."""
+        """The current catalog, for the page."""
         HISTORY.refresh()
-        raw = _read_vocab_raw()
-        pairs = sorted(raw["corrections"].items(),
-                       key=lambda p: len(p[0]), reverse=True)
-        return {
-            "vocab": {"terms": raw["terms"], "corrections": pairs,
-                      "dismissed": raw["dismissed"]},
-            "suggestions": HISTORY.suggestions(
-                raw["terms"], raw["corrections"], raw["dismissed"]),
-        }
+        return {"vocab": read_vocab()}
 
     def _save_vocab(self, raw):
         _write_vocab_raw(raw)   # raises -> the page shows "Could not save"
@@ -1664,15 +1488,6 @@ class JsApi:
         raw["corrections"] = {w: r for w, r in raw["corrections"].items()
                               if str(w).strip().lower() != key}
         self._save_vocab(raw)
-        return self._vocab_state()
-
-    def dismiss_suggestion(self, word):
-        word = (word or "").strip().lower()
-        raw = _read_vocab_raw()
-        if word and word not in {str(d).strip().lower() for d in raw["dismissed"]}:
-            raw["dismissed"].append(word)
-        # No signal_reload: app.py never reads 'dismissed'.
-        _write_vocab_raw(raw)
         return self._vocab_state()
 
     # --- Window controls ----------------------------------------------
@@ -1758,7 +1573,7 @@ PAGE_FUNCTIONS = (
     "get_elevenlabs_usage", "check_for_updates", "open_release_page", "install_update",
     "finish_setup", "get_setup_status", "retry_model", "read_clipboard_key",
     "mark_milestones_seen", "add_vocab_term", "add_vocab_correction",
-    "remove_vocab_term", "remove_vocab_correction", "dismiss_suggestion",
+    "remove_vocab_term", "remove_vocab_correction",
     "minimize_window", "toggle_maximize", "close_window",
     "get_window_position", "move_window",
 )
