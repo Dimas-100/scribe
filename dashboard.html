@@ -1,0 +1,2221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Nothing may be loaded from, or sent to, the network: the page is one
+       self-contained file (inline script and style, data: images). -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'" />
+  <title>Scribe Dashboard</title>
+  <script>
+    // Pick light or dark before anything paints: the saved theme (stamped
+    // on <html> by dashboard.py), or - for "system" - Windows' own mode.
+    // No flash of the wrong theme.
+    (function () {
+      const saved = document.documentElement.dataset.savedTheme;
+      document.documentElement.dataset.theme = saved === 'light' || saved === 'dark' ? saved
+        : (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    })();
+  </script>
+  <style>
+    /* ==========================================================
+       DESIGN TOKENS - one set per theme. Everything below uses
+       these, so the two themes can never drift apart.
+       ========================================================== */
+    :root {
+      color-scheme: light;
+      --bg:            #f7f7f5;
+      --panel:         #ffffff;
+      --sidebar:       #f0f0ed;
+      --border:        #e5e4e0;
+      --border-strong: #d4d3ce;
+      --text:          #1c1c1a;
+      --text-2:        #5e5d59;
+      --text-3:        #6f6d68;
+      --accent:        #2e6b5c;
+      --accent-strong: #245548;
+      --accent-soft:   #e3efea;
+      --on-accent:     #ffffff;
+      --hover:         rgba(0, 0, 0, 0.04);
+      --active:        rgba(0, 0, 0, 0.065);
+      --chart-muted:   #e4e3df;
+      --rec:           #c8453c;
+      --busy:          #946011;
+      --ok:            #2f7a4f;
+      --warn:          #8a5710;
+      --on-warn:       #ffffff;
+      --control-off:   #8a8984;
+      --err:           #b8382f;
+      --shadow:        0 1px 2px rgba(20, 20, 18, 0.05);
+      --ring:          rgba(46, 107, 92, 0.35);
+
+      --r-card: 10px;
+      --r-ctl:  8px;
+
+      --font:    'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+      --display: 'Segoe UI Variable Display', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+      --mono:    'Cascadia Mono', Consolas, ui-monospace, monospace;
+    }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg:            #111113;
+      --panel:         #18181b;
+      --sidebar:       #141416;
+      --border:        #27272a;
+      --border-strong: #3a3a3f;
+      --text:          #ececed;
+      --text-2:        #a1a1aa;
+      --text-3:        #85858e;
+      --accent:        #7cc2ab;
+      --accent-strong: #97d3bf;
+      --accent-soft:   rgba(124, 194, 171, 0.13);
+      --on-accent:     #0f1f1a;
+      --hover:         rgba(255, 255, 255, 0.045);
+      --active:        rgba(255, 255, 255, 0.075);
+      --chart-muted:   #26262a;
+      --rec:           #ef6f66;
+      --busy:          #e0a84a;
+      --ok:            #6cc08c;
+      --warn:          #e0a84a;
+      --on-warn:       #1f1605;
+      --control-off:   #6b6b73;
+      --err:           #f07b73;
+      --shadow:        none;
+      --ring:          rgba(124, 194, 171, 0.35);
+    }
+
+    /* ==========================================================
+       BASE
+       ========================================================== */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      background: var(--bg); color: var(--text);
+      font: 14px/1.5 var(--font);
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+    }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    input, select, textarea { font: inherit; color: inherit; }
+    [hidden] { display: none !important; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    code, kbd { font-family: var(--mono); font-size: 0.9em; }
+    kbd {
+      padding: 1px 6px; border: 1px solid var(--border-strong); border-bottom-width: 2px;
+      border-radius: 5px; background: var(--panel); color: var(--text); white-space: nowrap;
+    }
+    .num { font-variant-numeric: tabular-nums; }
+    ::-webkit-scrollbar { width: 12px; height: 12px; }
+    ::-webkit-scrollbar-thumb { background: var(--border-strong); border: 3px solid var(--bg); border-radius: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+
+    /* ==========================================================
+       TITLE BAR (the window is frameless; this is its chrome)
+       ========================================================== */
+    .titlebar { position: fixed; top: 0; left: 0; right: 0; height: 36px; display: flex; z-index: 50; }
+    .titlebar-drag { flex: 1; }
+    .titlebar-controls { display: flex; }
+    .tb-btn {
+      width: 46px; height: 36px; border: 0; background: transparent; color: var(--text-2);
+      display: grid; place-items: center; transition: background 120ms, color 120ms;
+    }
+    .tb-btn svg { width: 10px; height: 10px; }
+    .tb-btn:hover { background: var(--hover); color: var(--text); }
+    .tb-btn.close:hover { background: #c42b1c; color: #fff; }
+
+    /* ==========================================================
+       SHELL: sidebar + content
+       ========================================================== */
+    .app { display: grid; grid-template-columns: 216px 1fr; height: 100vh; }
+    .sidebar {
+      background: var(--sidebar); border-right: 1px solid var(--border);
+      padding: 44px 10px 10px; display: flex; flex-direction: column; gap: 2px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 0 10px 20px; }
+    .mark {
+      width: 24px; height: 24px; border-radius: 7px; background: var(--text); color: var(--bg);
+      display: grid; place-items: center; flex-shrink: 0;
+    }
+    .mark svg { width: 15px; height: 15px; }
+    .brand .name { font: 600 15px var(--display); letter-spacing: -0.01em; }
+    .nav { display: flex; flex-direction: column; gap: 2px; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; padding: 0 10px;
+      border: 0; border-radius: 7px; background: transparent; color: var(--text-2);
+      font-weight: 500; font-size: 13.5px; text-align: left; transition: background 120ms, color 120ms;
+    }
+    .nav-item svg { width: 16px; height: 16px; flex-shrink: 0; }
+    .nav-item:hover { background: var(--hover); color: var(--text); }
+    .nav-item.active { background: var(--active); color: var(--text); }
+    .nav-spacer { flex: 1; }
+    .status {
+      display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 10px 10px 4px;
+      border-top: 1px solid var(--border); font-size: 12.5px; color: var(--text-2); min-height: 38px;
+    }
+    .status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+    .status.recording .dot { background: var(--rec); animation: pulse 1.2s ease-in-out infinite; }
+    .status.busy .dot { background: var(--busy); }
+    .status.err .dot { background: var(--err); }
+    .status.off .dot { background: var(--text-3); }
+    .status .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status .svc { margin-left: auto; color: var(--text-3); white-space: nowrap; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+    /* The page scrolls BELOW the title bar, never under its buttons. */
+    .content { overflow-y: auto; margin-top: 36px; padding: 24px 48px 72px; }
+    .page { max-width: 860px; margin: 0 auto; }
+    h1 { font: 600 24px/1.25 var(--display); letter-spacing: -0.015em; }
+    .page-sub { color: var(--text-2); margin-top: 4px; }
+
+    /* ==========================================================
+       BUILDING BLOCKS
+       ========================================================== */
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-card); box-shadow: var(--shadow); }
+    .section { margin-top: 32px; }
+    .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+    .section-title { font-weight: 600; font-size: 13.5px; }
+    .section-meta { font-size: 12.5px; color: var(--text-3); }
+    .empty { color: var(--text-3); font-size: 13px; padding: 18px; }
+    .tag {
+      display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px;
+      background: var(--accent-soft); color: var(--accent); font-size: 11.5px; font-weight: 500;
+    }
+    .btn {
+      height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: 1px solid transparent;
+      background: var(--accent); color: var(--on-accent); font-weight: 600; font-size: 13px;
+      transition: background 120ms, opacity 120ms;
+    }
+    .btn:hover { background: var(--accent-strong); }
+    .btn:disabled { opacity: 0.45; cursor: default; }
+    .btn-ghost, .btn-sm, .btn-quiet {
+      height: 32px; padding: 0 12px; border-radius: var(--r-ctl); border: 1px solid var(--border-strong);
+      background: transparent; color: var(--text); font-weight: 500; font-size: 13px;
+      transition: background 120ms;
+    }
+    .btn-ghost:hover, .btn-sm:hover, .btn-quiet:hover { background: var(--hover); }
+    .btn-quiet { height: 28px; padding: 0 10px; font-size: 12.5px; color: var(--text-2); }
+    .btn-mini { height: 28px; padding: 0 10px; font-size: 12.5px; }
+    .btn-ghost:disabled, .btn-sm:disabled { opacity: 0.45; cursor: default; }
+
+    /* Stat row: several numbers in one card, split by hairlines. */
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); }
+    .stat { padding: 16px 18px; border-left: 1px solid var(--border); min-width: 0; }
+    .stat:first-child { border-left: 0; }
+    .stat .label { font-size: 12.5px; color: var(--text-2); }
+    .stat .value { font: 600 26px/1.25 var(--display); letter-spacing: -0.015em; margin-top: 6px; font-variant-numeric: tabular-nums; }
+    .stat .unit { font: 500 13px var(--font); color: var(--text-3); margin-left: 3px; letter-spacing: 0; }
+    .stat .note { font-size: 12px; color: var(--text-3); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stat .note.up { color: var(--ok); }
+
+    /* A custom tooltip for charts. */
+    .tip {
+      position: fixed; z-index: 60; pointer-events: none; padding: 6px 9px; border-radius: 7px;
+      background: var(--text); color: var(--bg); font-size: 12px; line-height: 1.4; white-space: nowrap;
+      opacity: 0; transform: translateY(2px); transition: opacity 100ms, transform 100ms;
+    }
+    .tip.show { opacity: 1; transform: none; }
+
+    /* ==========================================================
+       HOME
+       ========================================================== */
+    .live { margin-top: 24px; padding: 18px 20px 16px; transition: border-color 600ms ease; }
+    .live.fresh { border-color: var(--accent); }
+    .live-state { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-3); }
+    .live-state .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); }
+    .live-state.recording { color: var(--rec); }
+    .live-state.recording .dot { background: var(--rec); animation: pulse 1.2s ease-in-out infinite; }
+    .live-state.transcribing, .live-state.connecting { color: var(--busy); }
+    .live-state.transcribing .dot { background: var(--busy); animation: pulse 0.9s ease-in-out infinite; }
+    /* While you speak (or it transcribes), the last dictation steps back. */
+    .live-body { transition: opacity 180ms ease; }
+    .live.busy .live-body { opacity: 0.4; }
+    .live-body.enter { animation: rise 260ms ease; }
+    @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .live-text {
+      margin-top: 8px; font-size: 16px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere;
+      display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .live-text.expanded { -webkit-line-clamp: unset; }
+    .live-text.original { color: var(--text-2); }
+    .live-hint { margin-top: 8px; font-size: 15px; color: var(--text-2); line-height: 1.6; }
+    .live-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 12px; font-size: 12.5px; color: var(--text-2); }
+    .live-meta .meta-app { display: inline-flex; align-items: center; gap: 6px; }
+    .live-meta img, .app-letter { width: 14px; height: 14px; border-radius: 3px; }
+    .app-letter { display: inline-grid; place-items: center; background: var(--chart-muted); color: var(--text-2); font-size: 9px; font-weight: 600; }
+    .live-actions { display: flex; gap: 6px; margin-top: 14px; }
+
+    .chart { padding: 16px 18px 12px; }
+    .bars { display: flex; align-items: flex-end; gap: 3px; height: 112px; }
+    .bars .b { flex: 1; min-height: 2px; border-radius: 3px 3px 1px 1px; background: var(--chart-muted); transition: background 120ms; }
+    .bars .b.has { background: color-mix(in srgb, var(--accent) 45%, var(--panel)); }
+    .bars .b.today { background: var(--accent); }
+    .bars .b:hover { background: var(--accent-strong); }
+    .axis { display: flex; justify-content: space-between; margin-top: 8px; font-size: 11.5px; color: var(--text-3); }
+
+    .day-group + .day-group { margin-top: 18px; }
+    .day-label { font-size: 12.5px; color: var(--text-3); margin: 0 0 6px 2px; }
+    .row {
+      display: grid; grid-template-columns: 60px 1fr 18px; gap: 12px; align-items: start;
+      padding: 11px 14px; border-top: 1px solid var(--border); cursor: pointer; transition: background 120ms;
+    }
+    .row:first-child { border-top: 0; }
+    .row:hover { background: var(--hover); }
+    .row:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); border-radius: 6px; }
+    .row .time { font-size: 12.5px; color: var(--text-3); font-variant-numeric: tabular-nums; padding-top: 1px; white-space: nowrap; }
+    .row .text { font-size: 13.5px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+    .row .ic { padding-top: 2px; opacity: 0.9; }
+    .row .ic img, .row .ic .app-letter { width: 16px; height: 16px; }
+
+    /* ==========================================================
+       INSIGHTS
+       ========================================================== */
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+    .metric { padding: 16px 18px; display: flex; flex-direction: column; min-width: 0; }
+    .metric .label { font-size: 12.5px; color: var(--text-2); }
+    .metric .big { font: 600 28px/1.2 var(--display); letter-spacing: -0.015em; margin-top: 6px; font-variant-numeric: tabular-nums; }
+    .metric .big .unit { font: 500 13px var(--font); color: var(--text-3); margin-left: 4px; letter-spacing: 0; }
+    .metric .desc { font-size: 12.5px; color: var(--text-2); margin-top: 4px; line-height: 1.5; }
+    .metric .foot { font-size: 12px; color: var(--text-3); margin-top: auto; padding-top: 12px; }
+    .spark { width: 100%; height: 84px; margin-top: 12px; display: block; }
+    .spark .line { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+    .spark .area { fill: var(--accent-soft); stroke: none; }
+    .spark .dotp { fill: var(--accent); }
+    .dist { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+    .dist-row { display: grid; grid-template-columns: 92px 1fr 30px; gap: 10px; align-items: center; font-size: 12px; color: var(--text-2); }
+    .meter { height: 6px; border-radius: 3px; background: var(--chart-muted); overflow: hidden; }
+    .meter .fill { height: 100%; border-radius: 3px; background: var(--accent); }
+    .dist-row .n { text-align: right; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .hours { display: flex; align-items: flex-end; gap: 2px; height: 64px; margin-top: 14px; }
+    .hours .b { flex: 1; min-height: 2px; border-radius: 2px 2px 1px 1px; background: var(--chart-muted); }
+    .hours .b.has { background: color-mix(in srgb, var(--accent) 50%, var(--panel)); }
+    .hours .b.peak { background: var(--accent); }
+    .hours .b:hover { background: var(--accent-strong); }
+    .apps { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+    .app-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) 90px 44px; gap: 10px; align-items: center; font-size: 13px; }
+    .app-row img, .app-row .app-letter { width: 16px; height: 16px; }
+    .app-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .app-row .n { text-align: right; color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .heat { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 14px); gap: 4px; margin-top: 14px; justify-content: start; }
+    .heat-cell { width: 14px; height: 14px; border-radius: 3px; background: var(--chart-muted); }
+    .heat-cell.l1 { background: color-mix(in srgb, var(--accent) 30%, var(--panel)); }
+    .heat-cell.l2 { background: color-mix(in srgb, var(--accent) 55%, var(--panel)); }
+    .heat-cell.l3 { background: color-mix(in srgb, var(--accent) 80%, var(--panel)); }
+    .heat-cell.l4 { background: var(--accent); }
+    .heat-cell.future { background: transparent; }
+    .words { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 28px; margin-top: 12px; font-size: 13px; }
+    .word-row { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+    .word-row .n { color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+    /* ==========================================================
+       DICTIONARY
+       ========================================================== */
+    .dict-section { margin-top: 28px; }
+    .dict-section-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+    .dict-section-header h3 { font-size: 13.5px; font-weight: 600; }
+    .caption { font-size: 12.5px; color: var(--text-3); }
+    .suggest-list { display: flex; flex-direction: column; }
+    .suggest-card { padding: 14px 16px; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+    .suggest-card:first-child { border-top: 0; }
+    .suggest-main { flex: 1; min-width: 220px; }
+    .suggest-word { display: flex; align-items: baseline; gap: 10px; }
+    .suggest-word .sw { font-weight: 600; font-size: 14.5px; }
+    .suggest-word .sw-count { font-size: 12px; color: var(--text-3); }
+    .suggest-sample { font-size: 12.5px; color: var(--text-2); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .suggest-actions, .suggest-fix { display: flex; gap: 6px; align-items: center; }
+    .suggest-fix { width: 100%; }
+    .suggest-fix input { flex: 1; }
+    .sg-btn { height: 28px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--border-strong); background: transparent; font-size: 12.5px; font-weight: 500; color: var(--text); transition: background 120ms; }
+    .sg-btn:hover { background: var(--hover); }
+    .sg-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    .add-row { display: flex; gap: 8px; margin-bottom: 12px; }
+    .add-row input { flex: 1; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { display: inline-flex; align-items: center; gap: 2px; height: 28px; padding: 0 4px 0 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel); font-size: 13px; }
+    .chip-x, .corr-x { width: 20px; height: 20px; border: 0; border-radius: 50%; background: transparent; color: var(--text-3); font-size: 10px; display: grid; place-items: center; }
+    .chip-x:hover, .corr-x:hover { background: var(--hover); color: var(--text); }
+    .corr-list { display: flex; flex-direction: column; }
+    .corr-row { display: grid; grid-template-columns: 1fr 20px 1fr 24px; gap: 10px; align-items: center; padding: 10px 14px; border-top: 1px solid var(--border); font-size: 13.5px; }
+    .corr-row:first-child { border-top: 0; }
+    .corr-row .wrong { color: var(--text-2); text-decoration: line-through; text-decoration-color: var(--text-3); }
+    .corr-row .arrow { color: var(--text-3); text-align: center; }
+    .dict-footer { margin-top: 24px; font-size: 12.5px; color: var(--text-3); }
+
+    /* ==========================================================
+       SETTINGS + FORM CONTROLS
+       ========================================================== */
+    .settings-group { margin-top: 28px; }
+    .group-title { font-weight: 600; font-size: 13.5px; margin-bottom: 10px; }
+    .set-row { display: flex; align-items: center; justify-content: space-between; gap: 28px; padding: 14px 18px; border-top: 1px solid var(--border); }
+    .card > .set-row:first-child, .card > :first-child.set-row { border-top: 0; }
+    .card > .set-row[hidden] + .set-row { border-top: 1px solid var(--border); }
+    .set-row .desc { font-weight: 500; font-size: 13.5px; min-width: 0; }
+    .help { font-size: 12.5px; color: var(--text-2); font-weight: 400; margin-top: 2px; line-height: 1.45; }
+    .help.ok { color: var(--ok); } .help.warn { color: var(--warn); } .help.error { color: var(--err); }
+    .set-row .control { flex-shrink: 0; display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+    select, input[type="text"], input[type="password"] {
+      height: 32px; padding: 0 10px; min-width: 260px; border: 1px solid var(--border-strong);
+      border-radius: var(--r-ctl); background: var(--panel); color: var(--text); font-size: 13.5px;
+      transition: border-color 120ms, box-shadow 120ms;
+    }
+    select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+    /* Switches as Windows draws them: OFF is an outline with a small dark
+       knob, ON is filled with a light knob - readable in both themes. */
+    .toggle { width: 36px; height: 20px; border-radius: 999px; border: 1.5px solid var(--control-off); background: transparent; position: relative; flex-shrink: 0; transition: background 150ms, border-color 150ms; }
+    .toggle::after { content: ''; position: absolute; top: 3px; left: 3px; width: 11px; height: 11px; border-radius: 50%; background: var(--control-off); transition: transform 150ms, background 150ms; }
+    .toggle:hover { background: var(--hover); }
+    .toggle.on { background: var(--accent); border-color: var(--accent); }
+    .toggle.on::after { background: var(--on-accent); transform: translateX(16px); }
+    .about-actions { display: flex; gap: 6px; align-items: center; }
+    .segmented { display: inline-flex; padding: 2px; border: 1px solid var(--border-strong); border-radius: var(--r-ctl); background: var(--bg); }
+    .segmented button { height: 26px; padding: 0 14px; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); font-size: 12.5px; font-weight: 500; }
+    .segmented button.on { background: var(--panel); color: var(--text); font-weight: 600; box-shadow: 0 0 0 1px var(--control-off); }
+    .key-row { display: flex; align-items: center; gap: 8px; }
+    .key-row input { min-width: 220px; }
+    .key-saved { font-family: var(--mono); font-size: 12.5px; color: var(--text-2); }
+    .key-saved.removing { color: var(--err); }
+    .inline-retry { margin-left: 8px; border: 0; background: none; color: var(--accent); font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px; }
+    .save-row { display: flex; align-items: center; gap: 14px; margin-top: 24px; }
+    .save-status { font-size: 13px; color: var(--text-2); opacity: 0; transition: opacity 200ms; }
+    .save-status.show { opacity: 1; }
+    .save-status.error { color: var(--err); } .save-status.warn { color: var(--warn); }
+    .usage { padding: 14px 18px; }
+    .usage-row { display: grid; grid-template-columns: 170px 1fr 120px; gap: 14px; align-items: center; padding: 6px 0; font-size: 13px; }
+    .usage-row .w { color: var(--text); }
+    .usage-row .tr { height: 6px; border-radius: 3px; background: var(--chart-muted); overflow: hidden; }
+    .usage-row .fill { height: 100%; border-radius: 3px; background: var(--accent); }
+    .usage-row .fill.warn { background: var(--busy); } .usage-row .fill.danger { background: var(--err); }
+    .usage-row .n { text-align: right; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .usage-row .n strong { color: var(--text); font-weight: 600; }
+    .usage-note { font-size: 12.5px; color: var(--text-2); padding: 2px 0 6px; line-height: 1.5; }
+    .usage-sub { font-size: 12px; color: var(--text-3); margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border); }
+    .usage-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+
+    /* ==========================================================
+       WELCOME (first run)
+       ========================================================== */
+    .welcome { position: fixed; inset: 36px 0 0 0; overflow: auto; display: grid; place-items: center; padding: 24px; background: var(--bg); }
+    .wz-card { width: min(560px, 100%); padding: 28px 32px 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
+    .wz-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+    .wz-head .brand { padding: 0; }
+    .wz-dots { display: flex; gap: 4px; }
+    .wz-dot { width: 22px; height: 3px; border-radius: 2px; background: var(--border-strong); transition: background 200ms; }
+    .wz-dot.on { background: var(--accent); }
+    .wz-step h2 { font: 600 20px/1.3 var(--display); letter-spacing: -0.01em; }
+    .lead { color: var(--text-2); margin-top: 6px; line-height: 1.55; }
+    .wz-choices { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
+    .wz-choice {
+      position: relative; display: flex; flex-direction: column; gap: 2px; text-align: left;
+      padding: 12px 14px 12px 40px; border: 1px solid var(--border-strong); border-radius: 9px;
+      background: var(--panel); transition: border-color 120ms, background 120ms;
+    }
+    .wz-choice::before { content: ''; position: absolute; left: 14px; top: 15px; width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--border-strong); }
+    .wz-choice:hover { background: var(--hover); }
+    .wz-choice.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--panel)); }
+    .wz-choice.selected::before { border: 4px solid var(--accent); }
+    .wz-choice .t { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+    .wz-choice .d { font-size: 12.5px; color: var(--text-2); line-height: 1.45; }
+    .wz-choice .size, .size { font-size: 12px; color: var(--text-3); }
+    .wz-choice .tag { height: 18px; font-size: 11px; }
+    .wz-steps { margin: 14px 0 0; padding-left: 20px; display: grid; gap: 5px; font-size: 13px; line-height: 1.5; color: var(--text-2); }
+    .wz-steps li::marker { color: var(--text-3); }
+    .wz-label { display: block; margin-top: 18px; font-weight: 500; font-size: 13px; }
+    .wz-help { margin-top: 10px; }
+    .wz-key { display: flex; gap: 8px; margin-top: 6px; }
+    .wz-key input { flex: 1; min-width: 0; }
+    .wz-note { font-size: 12.5px; color: var(--text-2); margin-top: 8px; min-height: 0; }
+    .wz-note.ok { color: var(--ok); } .wz-note.warn { color: var(--warn); } .wz-note.error { color: var(--err); }
+    .wz-anyway { margin-top: 8px; }
+    .wz-link { border: 0; background: none; padding: 0; color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+    .wz-check { display: flex; align-items: flex-start; gap: 12px; margin-top: 18px; }
+    .wz-check .toggle { margin-top: 1px; }
+    .wz-check .desc { font-weight: 500; font-size: 13.5px; }
+    .wz-field { margin-top: 16px; }
+    .wz-field label { display: block; font-weight: 500; font-size: 13px; margin-bottom: 6px; }
+    .wz-field select { width: 100%; }
+    .wz-field .help { margin-top: 6px; }
+    .wz-progress { margin-top: 18px; }
+    .wz-progress-label { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--text-2); margin-bottom: 6px; }
+    .wz-progress .tr { height: 6px; border-radius: 3px; background: var(--chart-muted); overflow: hidden; }
+    .wz-progress .fill { height: 100%; border-radius: 3px; background: var(--accent); transition: width 300ms ease; }
+    .wz-progress .fill.pulse { animation: pulse 1.4s ease-in-out infinite; }
+    .wz-progress .fill.danger { background: var(--err); }
+    .wz-try { width: 100%; min-height: 110px; margin-top: 14px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--bg); line-height: 1.5; resize: vertical; }
+    .wz-actions { display: flex; align-items: center; gap: 8px; margin-top: 24px; }
+    .spacer { flex: 1; }
+
+    /* ==========================================================
+       TOAST
+       ========================================================== */
+    .toast {
+      position: fixed; left: 50%; bottom: 22px; z-index: 70; max-width: min(560px, 90vw);
+      padding: 9px 14px; border-radius: 8px; background: var(--text); color: var(--bg); font-size: 13px;
+      opacity: 0; transform: translate(-50%, 6px); transition: opacity 160ms, transform 160ms; pointer-events: none;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+    .toast.warn { background: var(--warn); color: var(--on-warn); }
+
+    @media (max-width: 1100px) {
+      .content { padding: 20px 32px 64px; }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+      .stat:nth-child(3) { border-left: 0; }
+      .stat:nth-child(n+3) { border-top: 1px solid var(--border); }
+    }
+  </style>
+</head>
+<body>
+  <!-- ===== Title bar (frameless window) ==================== -->
+  <div class="titlebar">
+    <div class="titlebar-drag"></div>
+    <div class="titlebar-controls">
+      <button class="tb-btn" id="tb-min" title="Minimize" aria-label="Minimize">
+        <svg viewBox="0 0 10 10" aria-hidden="true"><line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" stroke-width="1"/></svg>
+      </button>
+      <button class="tb-btn" id="tb-max" title="Maximize" aria-label="Maximize or restore">
+        <svg viewBox="0 0 10 10" aria-hidden="true"><rect x="1.5" y="1.5" width="7" height="7" stroke="currentColor" fill="none" stroke-width="1"/></svg>
+      </button>
+      <button class="tb-btn close" id="tb-close" title="Close" aria-label="Close">
+        <svg viewBox="0 0 10 10" aria-hidden="true"><line x1="1.5" y1="1.5" x2="8.5" y2="8.5" stroke="currentColor" stroke-width="1"/><line x1="8.5" y1="1.5" x2="1.5" y2="8.5" stroke="currentColor" stroke-width="1"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- ===== Welcome (first run) ============================ -->
+  <!-- Shown instead of the dashboard when Scribe starts for the first time
+       (dashboard.py --welcome). One card, five short steps. -->
+  <div class="welcome" id="welcome" hidden>
+    <div class="wz-card">
+      <div class="wz-head">
+        <div class="brand">
+          <span class="mark"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="9" width="3" height="6" rx="1.5" fill="currentColor"/><rect x="8" y="5" width="3" height="14" rx="1.5" fill="currentColor"/><rect x="13" y="8" width="3" height="8" rx="1.5" fill="currentColor"/><rect x="18" y="10.5" width="3" height="3" rx="1.5" fill="currentColor"/></svg></span>
+          <span class="name">Scribe</span>
+        </div>
+        <div class="wz-dots" aria-hidden="true"><span class="wz-dot"></span><span class="wz-dot"></span><span class="wz-dot"></span><span class="wz-dot"></span><span class="wz-dot"></span></div>
+      </div>
+
+      <section class="wz-step" data-step="mode">
+        <h2>Welcome to Scribe</h2>
+        <p class="lead">Hold a key, speak, let go — your words appear wherever you type. First, pick the voice model that turns your speech into text. You can change it later.</p>
+        <div class="wz-choices" id="wz-modes">
+          <button type="button" class="wz-choice selected" data-mode="groq"><span class="t">Groq<span class="tag">Recommended · free</span></span><span class="d">Fast and accurate, and it tidies your text with AI polish. Needs a free Groq account — about a minute to set up. Your audio is sent to Groq.</span></button>
+          <button type="button" class="wz-choice" data-mode="elevenlabs"><span class="t">ElevenLabs<span class="tag">Most accurate</span></span><span class="d">Text appears the moment you let go. Needs a paid ElevenLabs plan. Your audio is sent to ElevenLabs.</span></button>
+          <button type="button" class="wz-choice" data-mode="local"><span class="t">On this PC</span><span class="d">Private and offline, no account needed — nothing leaves your computer. Slower, and less accurate on most PCs.</span></button>
+        </div>
+        <div class="wz-actions"><span class="spacer"></span><button type="button" class="btn" id="wz-mode-next">Continue</button></div>
+      </section>
+
+      <section class="wz-step" data-step="local" hidden>
+        <h2>Choose accuracy</h2>
+        <p class="lead">Scribe downloads its speech model once. Bigger models hear you better but need a faster PC.</p>
+        <div class="wz-choices" id="wz-models">
+          <button type="button" class="wz-choice" data-model="base.en"><span class="t">Fast</span><span class="d">Quick on any PC. Good for short notes.</span><span class="size">About 150 MB</span></button>
+          <button type="button" class="wz-choice selected" data-model="small.en"><span class="t">Balanced<span class="tag">Recommended</span></span><span class="d">Accurate and responsive on most PCs.</span><span class="size">About 480 MB</span></button>
+          <button type="button" class="wz-choice" data-model="medium.en"><span class="t">Most accurate</span><span class="d">Best results. Needs a fast PC.</span><span class="size">About 1.5 GB</span></button>
+        </div>
+        <div class="wz-actions"><button type="button" class="btn-ghost" id="wz-local-back">Back</button><span class="spacer"></span><button type="button" class="btn" id="wz-local-next">Continue</button></div>
+      </section>
+
+      <section class="wz-step" data-step="cloud" hidden>
+        <h2>Connect your voice model</h2>
+        <p class="lead" id="wz-cloud-lead"></p>
+        <ol class="wz-steps">
+          <li><button type="button" class="wz-link" id="wz-get-key"></button><span id="wz-step-1"></span></li>
+          <li id="wz-step-2"></li>
+          <li>Paste it below — Scribe checks it right away.</li>
+        </ol>
+        <label class="wz-label" for="wz-key">Paste your API key here</label>
+        <div class="wz-key">
+          <input type="password" id="wz-key" placeholder="gsk_…" autocomplete="off" spellcheck="false" />
+          <button type="button" class="btn-sm" id="wz-key-paste">Paste</button>
+          <button type="button" class="btn-sm" id="wz-key-check">Check key</button>
+        </div>
+        <div class="wz-note" id="wz-key-note"></div>
+        <button type="button" class="btn-ghost wz-anyway" id="wz-key-anyway" hidden>Use it anyway</button>
+        <div class="help wz-help"><span id="wz-key-where">Your key stays on this PC, in Windows Credential Manager.</span><span id="wz-cloud-tip"></span></div>
+        <div class="wz-check">
+          <button type="button" class="toggle on" id="wz-backup" role="switch" aria-checked="false" aria-label="Offline backup"></button>
+          <div class="desc">Also download an offline backup <span class="size">(about 480 MB)</span><div class="help" id="wz-backup-help">If the internet or Groq is down, Scribe keeps working on your PC.</div></div>
+        </div>
+        <div class="wz-actions"><button type="button" class="btn-ghost" id="wz-cloud-back">Back</button><span class="spacer"></span><button type="button" class="btn" id="wz-cloud-next" disabled>Continue</button></div>
+      </section>
+
+      <section class="wz-step" data-step="setup" hidden>
+        <h2>Your setup</h2>
+        <p class="lead">You can change any of this later in Settings.</p>
+        <div class="wz-field"><label for="wz-mic">Microphone</label><select id="wz-mic"></select></div>
+        <div class="wz-field"><label for="wz-hotkey">Hotkey</label><select id="wz-hotkey"></select>
+          <div class="help">Hold it while you speak. If you use Windows' desktop shortcuts (Ctrl + Win + ←/→), pick Ctrl + Alt.</div></div>
+        <div class="wz-check">
+          <button type="button" class="toggle on" id="wz-login" role="switch" aria-checked="false" aria-label="Start Scribe when I sign in"></button>
+          <div class="desc">Start Scribe when I sign in<div class="help">It waits quietly in the tray until you hold the hotkey.</div></div>
+        </div>
+        <div class="wz-note" id="wz-setup-note"></div>
+        <div class="wz-actions"><button type="button" class="btn-ghost" id="wz-setup-back">Back</button><span class="spacer"></span><button type="button" class="btn" id="wz-finish">Finish setup</button></div>
+      </section>
+
+      <section class="wz-step" data-step="ready" id="wz-step-ready" hidden>
+        <h2 id="wz-ready-title">Getting ready</h2>
+        <div class="wz-progress" id="wz-progress">
+          <div class="wz-progress-label"><span id="wz-bar-label">Speech model</span><span class="n num" id="wz-bar-count"></span></div>
+          <div class="tr"><div class="fill" id="wz-bar" style="width:0%"></div></div>
+        </div>
+        <div class="wz-note" id="wz-ready-note"></div>
+        <div class="wz-actions"><button type="button" class="btn-ghost" id="wz-retry" hidden>Retry</button><span class="spacer"></span><button type="button" class="btn" id="wz-ready-next" disabled>Try it</button></div>
+      </section>
+
+      <section class="wz-step" data-step="try" hidden>
+        <h2>Try it</h2>
+        <p class="lead">Click in the box, hold <kbd id="wz-try-hotkey">Ctrl + Win</kbd>, say something, and let go.</p>
+        <textarea class="wz-try" id="wz-try-box" placeholder="Your words appear here…" spellcheck="false"></textarea>
+        <div class="wz-note" id="wz-try-note"></div>
+        <div class="wz-actions"><button type="button" class="btn-ghost" id="wz-close">Close</button><span class="spacer"></span><button type="button" class="btn" id="wz-open">Open dashboard</button></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="app">
+    <!-- Sidebar ============================================= -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="mark"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="9" width="3" height="6" rx="1.5" fill="currentColor"/><rect x="8" y="5" width="3" height="14" rx="1.5" fill="currentColor"/><rect x="13" y="8" width="3" height="8" rx="1.5" fill="currentColor"/><rect x="18" y="10.5" width="3" height="3" rx="1.5" fill="currentColor"/></svg></span>
+        <span class="name">Scribe</span>
+      </div>
+      <nav class="nav" id="main-nav">
+        <button type="button" class="nav-item active" data-page="home">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9v11h13V9"/></svg>
+          Home
+        </button>
+        <button type="button" class="nav-item" data-page="insights">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/></svg>
+          Insights
+        </button>
+        <button type="button" class="nav-item" data-page="dictionary">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H19v15H5.5A1.5 1.5 0 0 0 4 19.5v-15z"/><path d="M4 19.5A1.5 1.5 0 0 0 5.5 21H19v-3"/></svg>
+          Dictionary
+        </button>
+      </nav>
+      <div class="nav-spacer"></div>
+      <nav class="nav" id="bottom-nav">
+        <button type="button" class="nav-item" data-page="settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68 1.65 1.65 0 0 0 10 3.17V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          Settings
+        </button>
+      </nav>
+      <!-- What Scribe is doing right now, and which service transcribes. -->
+      <div class="status off" id="status" role="status" aria-live="polite">
+        <span class="dot"></span><span class="text">Connecting…</span><span class="svc" id="plan-badge"></span>
+      </div>
+    </aside>
+
+    <main class="content" id="content">
+      <!-- HOME ================================================ -->
+      <section class="page" id="page-home">
+        <h1 id="greeting">Hello</h1>
+        <p class="page-sub" id="home-sub"></p>
+
+        <!-- The live card: listening / transcribing / your latest words. -->
+        <div class="card live" id="live" aria-live="polite">
+          <div class="live-state" id="live-state"><span class="dot"></span><span class="label">Ready</span></div>
+          <div class="live-body" id="live-body"></div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><span class="section-title">Today</span><span class="section-meta" id="today-meta"></span></div>
+          <div class="card stats" id="today-stats"></div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><span class="section-title">Last 30 days</span><span class="section-meta num" id="chart-meta"></span></div>
+          <div class="card chart">
+            <div class="bars" id="home-chart"></div>
+            <div class="axis" id="home-chart-axis"></div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><span class="section-title">Recent</span><span class="section-meta">Click an entry to copy it</span></div>
+          <div id="home-history-list"><div class="empty">Loading…</div></div>
+        </div>
+      </section>
+
+      <!-- INSIGHTS ============================================ -->
+      <section class="page" id="page-insights" hidden>
+        <h1>Insights</h1>
+        <p class="page-sub">How you dictate — built only from your own history, on this PC.</p>
+
+        <div class="section">
+          <div class="section-head"><span class="section-title">All time</span><span class="section-meta" id="ins-since"></span></div>
+          <div class="card stats" id="ins-summary"></div>
+        </div>
+
+        <div class="grid-2">
+          <div class="card metric" id="ins-pace"></div>
+          <div class="card metric" id="ins-speed"></div>
+          <div class="card metric" id="ins-polish"></div>
+          <div class="card metric" id="ins-hours"></div>
+          <div class="card metric" id="ins-apps"></div>
+          <div class="card metric" id="ins-consistency"></div>
+        </div>
+
+        <div class="section" id="ins-words-panel">
+          <div class="section-head"><span class="section-title">Words you use most</span><span class="section-meta">Common words left out</span></div>
+          <div class="card metric"><div class="words" id="ins-words-list"></div></div>
+        </div>
+      </section>
+
+      <!-- DICTIONARY ========================================== -->
+      <section class="page" id="page-dictionary" hidden>
+        <h1>Dictionary</h1>
+        <p class="page-sub">Teach Scribe your names and jargon. Changes apply from your next dictation.</p>
+
+        <div class="dict-section" id="dict-suggest-section" hidden>
+          <div class="dict-section-header"><h3>Suggestions</h3><span class="caption" id="dict-suggest-count"></span></div>
+          <div id="dict-suggest-host" class="card suggest-list"></div>
+        </div>
+
+        <div class="dict-section">
+          <div class="dict-section-header"><h3>Your words</h3><span class="caption" id="dict-terms-count">0 words</span></div>
+          <div class="add-row">
+            <input type="text" id="dict-add-term" spellcheck="false" placeholder="Add a word Scribe should know…" />
+            <button class="btn-sm" id="dict-add-term-btn">Add</button>
+          </div>
+          <div id="dict-terms-host" class="chips"><div class="empty">Nothing here yet.</div></div>
+        </div>
+
+        <div class="dict-section">
+          <div class="dict-section-header"><h3>Corrections</h3><span class="caption" id="dict-corr-count">0 corrections</span></div>
+          <div id="dict-corr-host" class="card corr-list"><div class="empty">Nothing here yet.</div></div>
+        </div>
+
+        <div class="dict-footer">Saved in <code>vocabulary.json</code> in your data folder.</div>
+      </section>
+
+      <!-- SETTINGS ============================================ -->
+      <section class="page" id="page-settings" hidden>
+        <h1>Settings</h1>
+        <p class="page-sub">How Scribe looks, listens and types.</p>
+        <form class="settings-form" id="settings-form" onsubmit="return false;">
+
+          <div class="settings-group">
+            <div class="group-title">Appearance</div>
+            <div class="card">
+              <div class="set-row"><div class="desc">Theme<div class="help">System follows Windows' light or dark mode.</div></div>
+                <div class="control"><div class="segmented" id="set-theme" role="radiogroup" aria-label="Theme">
+                  <button type="button" data-theme="system" role="radio">System</button><button type="button" data-theme="light" role="radio">Light</button><button type="button" data-theme="dark" role="radio">Dark</button>
+                </div></div></div>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <div class="group-title">General</div>
+            <div class="card">
+              <div class="set-row"><div class="desc"><label for="set-name">Your name</label><div class="help">Used in your greeting and as a word Scribe should recognize.</div></div><div class="control"><input type="text" id="set-name" placeholder="e.g. Sam" /></div></div>
+              <div class="set-row toggle-field"><div class="desc">Start Scribe when I sign in<div class="help">It waits quietly in the tray until you hold the hotkey.</div></div><div class="control"><button type="button" class="toggle" id="set-login" role="switch" aria-checked="false" aria-label="Start Scribe when I sign in"></button></div></div>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <div class="group-title">Dictation</div>
+            <div class="card">
+              <div class="set-row"><div class="desc"><label for="set-hotkey">Hotkey</label><div class="help">Hold it while you speak.</div></div><div class="control"><select id="set-hotkey"></select></div></div>
+              <div class="set-row"><div class="desc"><label for="set-mic">Microphone</label></div><div class="control"><select id="set-mic"></select></div></div>
+              <div class="set-row"><div class="desc"><label for="set-model">Speech model on this PC</label><div class="help" id="set-model-status"></div></div><div class="control"><select id="set-model"></select></div></div>
+              <div class="set-row toggle-field"><div class="desc">Add a space after each dictation<div class="help">Keeps back-to-back dictations from running together.</div></div><div class="control"><button type="button" class="toggle" id="set-trailing" role="switch" aria-checked="false" aria-label="Add a space after each dictation"></button></div></div>
+              <div class="set-row toggle-field"><div class="desc">Paste mode<div class="help">Delivers text through the clipboard — instant for long dictations.</div></div><div class="control"><button type="button" class="toggle" id="set-paste" role="switch" aria-checked="false" aria-label="Paste mode"></button></div></div>
+              <div class="set-row toggle-field"><div class="desc">Sound cues<div class="help">A soft tone when recording starts and stops.</div></div><div class="control"><button type="button" class="toggle" id="set-sound-cues" role="switch" aria-checked="false" aria-label="Sound cues"></button></div></div>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <div class="group-title">Cloud</div>
+            <div class="card">
+              <div class="set-row toggle-field"><div class="desc">Use the cloud<div class="help">Faster and more accurate. If it can't answer, Scribe uses your backup.</div></div><div class="control"><button type="button" class="toggle" id="set-cloud" role="switch" aria-checked="false" aria-label="Use the cloud"></button></div></div>
+              <div class="set-row"><div class="desc"><label for="set-provider">Cloud service</label><div class="help">ElevenLabs transcribes while you talk, so text lands the moment you let go.</div></div><div class="control"><select id="set-provider"><option value="elevenlabs">ElevenLabs — most accurate (paid)</option><option value="groq">Groq — free tier</option></select></div></div>
+              <div class="set-row" id="set-ekey-field"><div class="desc"><label for="set-ekey">ElevenLabs API key</label><div class="help">From elevenlabs.io → Developers → API keys. It needs Speech to Text access.</div></div>
+                <div class="control"><div class="key-row">
+                  <span class="key-saved" id="set-ekey-saved" hidden></span>
+                  <input type="password" id="set-ekey" placeholder="sk_… (Ctrl + V to paste)" autocomplete="off" spellcheck="false" />
+                  <button type="button" class="btn-ghost btn-mini" id="set-ekey-replace" hidden>Replace</button>
+                  <button type="button" class="btn-ghost btn-mini" id="set-ekey-remove" hidden>Remove</button>
+                </div></div></div>
+              <div class="set-row"><div class="desc"><label for="set-key">Groq API key</label><div class="help" id="set-key-help">Get one free at console.groq.com/keys.</div></div>
+                <div class="control"><div class="key-row">
+                  <span class="key-saved" id="set-key-saved" hidden></span>
+                  <input type="password" id="set-key" placeholder="gsk_… (Ctrl + V to paste)" autocomplete="off" spellcheck="false" />
+                  <button type="button" class="btn-ghost btn-mini" id="set-key-replace" hidden>Replace</button>
+                  <button type="button" class="btn-ghost btn-mini" id="set-key-remove" hidden>Remove</button>
+                </div></div></div>
+              <div class="set-row toggle-field"><div class="desc">AI polish<div class="help">Cleans up each dictation like Wispr Flow: grammar, punctuation, false starts. Uses your Groq key (free).</div></div><div class="control"><button type="button" class="toggle" id="set-polish" role="switch" aria-checked="false" aria-label="AI polish"></button></div></div>
+              <div class="set-row" id="set-polish-style-row"><div class="desc">Polish style<div class="help" id="set-polish-style-help"></div></div>
+                <div class="control"><div class="segmented" id="set-polish-style" role="radiogroup" aria-label="Polish style">
+                  <button type="button" data-style="light" role="radio">Light</button><button type="button" data-style="full" role="radio">Full</button>
+                </div></div></div>
+              <div class="set-row toggle-field" id="set-pipeline-row"><div class="desc">Transcribe while you talk<div class="help">Groq starts on your words before you let go, so text lands sooner. Uses a few extra Groq calls per dictation.</div></div><div class="control"><button type="button" class="toggle" id="set-pipeline" role="switch" aria-checked="false" aria-label="Transcribe while you talk"></button></div></div>
+              <div class="set-row toggle-field" id="set-backup-row"><div class="desc">Offline backup<div class="help">Keep the speech model on this PC for when the cloud can't be reached.</div></div><div class="control"><button type="button" class="toggle" id="set-backup" role="switch" aria-checked="false" aria-label="Offline backup"></button></div></div>
+            </div>
+          </div>
+
+          <div class="settings-group" id="cloud-panel" hidden>
+            <div class="usage-head"><div class="group-title">Usage</div><span class="caption" id="cloud-meta"></span></div>
+            <div class="card usage">
+              <div id="eleven-usage" hidden>
+                <div class="usage-row" id="eleven-row"><span class="w">ElevenLabs · this month</span><div class="tr"><div class="fill" id="eleven-fill"></div></div><span class="n" id="eleven-num"></span></div>
+                <div class="usage-note" id="eleven-note"></div>
+              </div>
+              <div class="usage-sub" id="groq-sub" hidden>Groq backup · today</div>
+              <div id="cloud-rows"></div>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <div class="group-title">About</div>
+            <div class="card">
+              <div class="set-row"><div class="desc">Scribe <span class="num" id="about-version"></span><div class="help" id="about-status"></div></div>
+                <div class="control about-actions"><button type="button" class="btn-ghost btn-mini" id="about-notes" hidden>What’s new</button><button type="button" class="btn-ghost btn-mini" id="about-check">Check for updates</button><button type="button" class="btn btn-mini" id="about-install" hidden>Update now</button></div></div>
+              <div class="set-row toggle-field"><div class="desc">Check for updates automatically<div class="help">Once a day Scribe asks GitHub whether a newer version is out. Nothing about you or your dictations is sent.</div></div><div class="control"><button type="button" class="toggle" id="set-updates" role="switch" aria-checked="false" aria-label="Check for updates automatically"></button></div></div>
+            </div>
+          </div>
+
+          <div class="save-row"><button type="button" class="btn" id="set-save">Save settings</button><span class="save-status" id="set-status">Saved. Changes apply right away.</span></div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="history-copied" role="status">Copied to clipboard</div>
+  <div class="tip" id="tip"></div>
+
+  <script>
+    // ===========================================================
+    //  SCRIBE DASHBOARD - client. Talks to Python through
+    //  window.pywebview.api (exposed by dashboard.py - only the
+    //  functions in its PAGE_FUNCTIONS list).
+    // ===========================================================
+    const $ = (sel) => document.querySelector(sel);
+    const $$ = (sel) => [...document.querySelectorAll(sel)];
+
+    const state = {
+      entries: [], config: {},
+      vocab: { terms: [], corrections: [], dismissed: [] },
+      choices: { hotkeys: [], models: [], mics: [] },
+      appIcons: {}, cloud: null, logSig: null,
+      suggestions: [],
+      keyAction: {},         // per service: null / 'replace' / 'remove'
+      eleven: null,          // ElevenLabs' month (get_elevenlabs_usage), or null
+      elevenTimer: null,
+      themePref: 'system',   // what the user chose; the page resolves "system"
+      polishStyle: 'full',   // Settings' Light / Full, until Save
+      appVersion: '',        // this copy's version (Settings -> About)
+    };
+
+    // --- Theme -----------------------------------------------
+    // "system" follows Windows (and changes with it, live).
+    const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    function resolveTheme(pref) { return pref === 'light' || pref === 'dark' ? pref : (darkQuery.matches ? 'dark' : 'light'); }
+    function applyTheme(pref) {
+      state.themePref = ['system', 'light', 'dark'].includes(pref) ? pref : 'system';
+      document.documentElement.dataset.theme = resolveTheme(state.themePref);
+      $$('#set-theme button').forEach(b => {
+        const on = b.dataset.theme === state.themePref;
+        b.classList.toggle('on', on); b.setAttribute('aria-checked', on ? 'true' : 'false');
+      });
+    }
+    darkQuery.addEventListener('change', () => applyTheme(state.themePref));
+    // A theme applies - and is kept - the moment you pick it, like Windows'
+    // own settings (a look you can see shouldn't wait for Save). Only the
+    // theme is sent, so other unsaved changes on the page stay as they are.
+    $$('#set-theme button').forEach(b => b.addEventListener('click', async () => {
+      applyTheme(b.dataset.theme);
+      try {
+        const cfg = await window.pywebview.api.save_settings({ theme: state.themePref });
+        state.config.theme = cfg.theme;
+      } catch (e) {
+        showToast(`Couldn't save the theme — ${(e && e.message) || 'please try again.'}`, 4200, 'warn');
+      }
+    }));
+
+    // --- Page switcher ---------------------------------------
+    function showPage(name) {
+      $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page === name));
+      $$('.page').forEach(p => { p.hidden = (p.id !== `page-${name}`); });
+      $('#content').scrollTop = 0; hideTip();
+      if (name === 'insights') renderInsights();
+      // The live card may have been filled while Home was hidden, when its
+      // "Show more" couldn't be measured - measure it now.
+      if (name === 'home' && live.shownKey && latestEntry()) fillLiveBody(latestEntry());
+      if (name === 'settings') {
+        pollStatus(true);
+        if (!about.checked && state.config.check_updates !== false) checkUpdates();
+      }
+    }
+    $$('.nav-item').forEach(el => el.addEventListener('click', () => showPage(el.dataset.page)));
+
+    // --- Formatting helpers ----------------------------------
+    const plural = (n, word) => `${word}${n === 1 ? '' : 's'}`;
+    function fmtInt(n) { return Math.round(n).toLocaleString(); }
+    function formatBigNumber(n) {
+      // Round first, then pick the unit: 999,950 is "1M", never "1000K".
+      if (n >= 999_950) return (Math.round(n / 100_000) / 10).toString().replace(/\.0$/, '') + 'M';
+      if (n >= 999.5) return (Math.round(n / 100) / 10).toString().replace(/\.0$/, '') + 'K';
+      return String(Math.round(n));
+    }
+    function formatMinutes(min) {
+      if (min < 1) return { v: min > 0 ? '<1' : '0', u: 'min' };
+      if (min < 60) return { v: String(Math.round(min)), u: 'min' };
+      const h = min / 60; return { v: h < 10 ? h.toFixed(1) : String(Math.round(h)), u: 'h' };
+    }
+    function formatHour(h) {
+      if (h === 0) return '12 a.m.'; if (h < 12) return h + ' a.m.';
+      if (h === 12) return '12 p.m.'; return (h - 12) + ' p.m.';
+    }
+    function greeting(name) {
+      const h = new Date().getHours();
+      const part = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+      return name ? `${part}, ${name}` : part;
+    }
+    function dayStart(t) { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); }
+    function friendlyDay(d) {
+      const delta = Math.round((dayStart(Date.now()) - dayStart(d)) / 86400000);
+      if (delta === 0) return 'Today';
+      if (delta === 1) return 'Yesterday';
+      if (delta < 7) return new Date(d).toLocaleDateString(undefined, { weekday: 'long' });
+      return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    }
+    function timeAgo(ts) {
+      const s = (Date.now() - new Date(ts).getTime()) / 1000;
+      if (isNaN(s)) return '';
+      if (s < 45) return 'just now';
+      if (s < 3600) return `${Math.round(s / 60)} min ago`;
+      if (s < 86400 && dayStart(ts) === dayStart(Date.now())) return `${Math.round(s / 3600)} h ago`;
+      const d = new Date(ts);
+      return `${friendlyDay(d)}, ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+    }
+    const ENGINE_NAMES = { elevenlabs: 'ElevenLabs', groq: 'Groq', local: 'On this PC' };
+    function sumWords(list) { return list.reduce((s, e) => s + (e.words || 0), 0); }
+    function sumSeconds(list) { return list.reduce((s, e) => s + (e.duration || 0), 0); }
+    function avgWPM(list) { const sec = sumSeconds(list); return sec > 0 ? sumWords(list) / (sec / 60) : 0; }
+    function savedMinutes(list) { return Math.max(0, sumWords(list) / 40 - sumSeconds(list) / 60); }   // vs typing at 40 wpm
+    function wordCount(text) { return (text || '').split(/\s+/).filter(Boolean).length; }
+    // Words in any language ("José", "naïve"), with inner apostrophes.
+    function tokenize(text) { return (text.toLowerCase().match(/\p{L}+(?:'\p{L}+)*/gu) || []); }
+    const STOP_WORDS = new Set(("the a an and or but of in on at to for with by from is am are was were be " +
+      "been being have has had do does did will would could should can may this that these those " +
+      "i you he she it we they my your his her its our their me him them us what which who how when " +
+      "where why as if so than then just like get got also really very more most some any all no not " +
+      "about into out now here there too only own same such i'm i've i'll i'd it's that's don't doesn't " +
+      "didn't won't can't you're we're they're isn't let let's want need make one okay yeah").split(' '));
+
+    // An app's icon (extracted from its .exe by dashboard.py), or its first letter.
+    function appIcon(name, exe) {
+      const uri = exe ? (state.appIcons || {})[exe] : null;
+      if (uri) { const img = document.createElement('img'); img.alt = ''; img.src = uri; return img; }
+      const span = document.createElement('span'); span.className = 'app-letter';
+      span.textContent = ((name || '?')[0] || '?').toUpperCase(); return span;
+    }
+
+    // A shared tooltip for the charts.
+    const tip = $('#tip');
+    function showTip(ev, html) {
+      tip.innerHTML = html; tip.classList.add('show');
+      const r = tip.getBoundingClientRect();
+      tip.style.left = Math.min(window.innerWidth - r.width - 8, Math.max(8, ev.clientX - r.width / 2)) + 'px';
+      tip.style.top = (ev.clientY - r.height - 12) + 'px';
+    }
+    function hideTip() { tip.classList.remove('show'); }
+    function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+    // ===== LIVE: what Scribe is doing, and your latest words ====
+    // The app's status (listening / transcribing / idle) comes from
+    // pollStatus every 800 ms; new dictations from startLogPolling every
+    // second. Both only while the window can be seen.
+    const live = { activity: 'idle', running: null, shownKey: null, shownTs: '', primed: false, showRaw: false, expanded: false };
+    // Out of sight: another app covers it (document.hidden), or it's
+    // minimized - dashboard.py says so, because WebView2 doesn't always.
+    function pageHidden() { return document.hidden || window.scribeMinimized === true; }
+    function historyKey(e) { return (e.timestamp || '') + '|' + (e.text || '').slice(0, 60); }
+    function latestEntry() { return state.entries.length ? state.entries[state.entries.length - 1] : null; }
+
+    function renderLiveState() {
+      const e = latestEntry(), el = $('#live-state'), act = live.activity;
+      el.className = 'live-state' + (act !== 'idle' ? ' ' + act : '');
+      $('#live').classList.toggle('busy', act !== 'idle' && !!e);
+      el.querySelector('.label').textContent =
+        act === 'recording' ? 'Listening…' : act === 'transcribing' ? 'Transcribing…'
+        : act === 'connecting' ? 'Starting the mic — speak when it\'s listening'
+        : live.running === false ? 'Scribe isn\'t running — start it from the Start menu'
+        : e ? `Latest dictation · ${timeAgo(e.timestamp)}` : 'Ready when you are';
+    }
+
+    function renderLive() {
+      renderLiveState();
+      const e = latestEntry(), body = $('#live-body'), card = $('#live');
+      if (!e) {
+        live.shownKey = null;
+        body.innerHTML = '';
+        const hint = document.createElement('div'); hint.className = 'live-hint';
+        hint.append('Hold ');
+        const k = document.createElement('kbd'); k.textContent = state.config.hotkey || 'Ctrl + Win'; hint.append(k);
+        hint.append(' anywhere in Windows, speak, and let go. Your words appear at your cursor — and here, with how it went.');
+        body.appendChild(hint);
+        live.primed = true;
+        return;
+      }
+      const key = historyKey(e);
+      if (key === live.shownKey) return;
+      // A dictation that arrives while the page is open is "new": it fades
+      // in and the card's edge lights up for a moment. Not the one already
+      // there when the page opens, and not an older one that comes back to
+      // the top because the newest was undone ("scratch that").
+      const ts = e.timestamp || '';
+      const isNew = live.primed && ts > live.shownTs;
+      live.shownKey = key; live.shownTs = ts; live.showRaw = false; live.expanded = false; live.primed = true;
+      fillLiveBody(e);
+      if (isNew) {
+        body.classList.remove('enter'); void body.offsetWidth; body.classList.add('enter');
+        card.classList.add('fresh'); clearTimeout(live.freshTimer);
+        live.freshTimer = setTimeout(() => card.classList.remove('fresh'), 1800);
+      }
+    }
+
+    function fillLiveBody(e) {
+      const body = $('#live-body'); body.innerHTML = '';
+      const text = document.createElement('div');
+      text.className = 'live-text' + (live.expanded ? ' expanded' : '') + (live.showRaw ? ' original' : '');
+      text.textContent = live.showRaw && e.raw ? e.raw : (e.text || '');
+      body.appendChild(text);
+
+      const meta = document.createElement('div'); meta.className = 'live-meta';
+      const add = (content) => { const s = document.createElement('span'); if (typeof content === 'string') s.textContent = content; else s.appendChild(content); meta.appendChild(s); return s; };
+      if (e.app_name) { const s = add(appIcon(e.app_name, e.app_exe)); s.className = 'meta-app'; s.append(e.app_name); }
+      add(`${fmtInt(e.words || 0)} ${plural(e.words || 0, 'word')}`);
+      if (e.duration > 1 && e.words) add(`${Math.round(e.words / e.duration * 60)} wpm`);
+      if (typeof e.latency === 'number') add(`text in ${e.latency.toFixed(2)} s`);
+      if (e.engine) add(ENGINE_NAMES[e.engine] || e.engine);
+      if (e.polished) { const t = document.createElement('span'); t.className = 'tag'; t.textContent = 'Polished'; meta.appendChild(t); }
+      body.appendChild(meta);
+
+      const actions = document.createElement('div'); actions.className = 'live-actions';
+      const btn = (label, fn) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'btn-quiet'; b.textContent = label; b.addEventListener('click', fn); actions.appendChild(b); return b; };
+      btn('Copy', () => copyToClipboard(live.showRaw && e.raw ? e.raw : e.text));
+      if (e.raw) btn(live.showRaw ? 'Show polished' : 'Show what you said', () => { live.showRaw = !live.showRaw; fillLiveBody(e); });
+      body.appendChild(actions);
+      // "Show more" only when the text is really cut off.
+      requestAnimationFrame(() => {
+        if (live.expanded || text.scrollHeight > text.clientHeight + 2) {
+          btn(live.expanded ? 'Show less' : 'Show more', () => { live.expanded = !live.expanded; fillLiveBody(e); });
+        }
+      });
+    }
+    // "2 min ago" keeps up with the clock.
+    setInterval(() => { if (!pageHidden() && live.activity === 'idle') renderLiveState(); }, 30000);
+
+    // The sidebar's status line.
+    function renderStatus(st) {
+      const el = $('#status'), txt = el.querySelector('.text');
+      let cls = '', label = 'Ready';
+      const m = (st && st.model) || {};
+      if (!st || !st.running) { cls = 'off'; label = 'Scribe isn\'t running'; }
+      else if (st.setup_complete === false) { cls = 'busy'; label = 'Finish setup'; }
+      else if (st.activity === 'recording') { cls = 'recording'; label = 'Listening…'; }
+      else if (st.activity === 'transcribing') { cls = 'busy'; label = 'Transcribing…'; }
+      else if (st.activity === 'connecting') { cls = 'busy'; label = 'Starting the mic…'; }
+      else if (!st.cloud && m.state === 'downloading') { cls = 'busy'; label = `Downloading model · ${modelPercent(m)}%`; }
+      else if (!st.cloud && m.state === 'loading') { cls = 'busy'; label = 'Loading model…'; }
+      else if (!st.cloud && m.state === 'failed') { cls = 'err'; label = 'Speech model unavailable'; }
+      el.className = 'status' + (cls ? ' ' + cls : '');
+      txt.textContent = label;
+      if (st && st.running && st.provider) $('#plan-badge').textContent = ENGINE_NAMES[st.provider] || '';
+    }
+
+    let statusBusy = false;
+    // force: ask even while the window is hidden (once at boot, so the
+    // status line is right from the start).
+    async function pollStatus(force = false) {
+      if (statusBusy || (pageHidden() && !force) || !$('#welcome').hidden) return;
+      if (!window.pywebview || !window.pywebview.api || !window.pywebview.api.get_setup_status) return;
+      statusBusy = true;
+      try {
+        const st = await window.pywebview.api.get_setup_status();
+        const before = live.activity, wasRunning = live.running;
+        live.running = !!(st && st.running);
+        const next = live.running ? (st.activity || 'idle') : 'idle';
+        renderStatus(st);
+        if (!$('#page-settings').hidden) renderModelStatus(st);
+        // A dictation just finished: fetch it BEFORE the card leaves
+        // "Transcribing…" - otherwise the previous dictation would show,
+        // undimmed, until the history poll caught up (up to a second).
+        if (before !== 'idle' && next === 'idle') await pollHistory();
+        live.activity = next;
+        if (before !== live.activity || wasRunning !== live.running) renderLiveState();
+      } catch (e) { /* try again next tick */ }
+      finally { statusBusy = false; }
+    }
+    setInterval(() => pollStatus(), 800);
+    document.addEventListener('visibilitychange', () => { if (!pageHidden()) pollStatus(); });
+
+    // ===== HOME ===============================================
+    function compareNote(today, usual, fmt) {
+      if (!usual) return '';
+      if (!today) return `Usually ${fmt(usual)}`;
+      const pct = Math.round((today / usual - 1) * 100);
+      if (Math.abs(pct) < 5) return 'About your usual';
+      return `${pct > 0 ? '↑' : '↓'} ${Math.abs(pct)}% vs your usual ${fmt(usual)}`;
+    }
+
+    function statTile(label, value, unit, note, up) {
+      const d = document.createElement('div'); d.className = 'stat';
+      d.innerHTML = '<div class="label"></div><div class="value"><span class="v"></span><span class="unit"></span></div><div class="note"></div>';
+      d.querySelector('.label').textContent = label;
+      d.querySelector('.v').textContent = value;
+      d.querySelector('.unit').textContent = unit || '';
+      const n = d.querySelector('.note'); n.textContent = note || ' '; if (up) n.classList.add('up');
+      return d;
+    }
+
+    function renderToday(entries, todays) {
+      // "Your usual" = your average ACTIVE day over the last 30 days (not
+      // counting today), so a day off doesn't drag it down.
+      const today = dayStart(Date.now()), since = today - 30 * 86400000;
+      const days = new Map();
+      for (const e of entries) {
+        const t = dayStart(e.timestamp); if (isNaN(t) || t >= today || t < since) continue;
+        if (!days.has(t)) days.set(t, []); days.get(t).push(e);
+      }
+      const n = days.size, past = [...days.values()].flat();
+      const usualWords = n ? sumWords(past) / n : 0, usualCount = n ? past.length / n : 0;
+      const usualPace = avgWPM(past), usualSaved = n ? savedMinutes(past) / n : 0;
+      const w = sumWords(todays), pace = avgWPM(todays), saved = savedMinutes(todays);
+      const host = $('#today-stats'); host.innerHTML = '';
+      const pct = (a, b) => a && b && a > b * 1.05;
+      host.appendChild(statTile('Words', fmtInt(w), '', compareNote(w, usualWords, fmtInt), pct(w, usualWords)));
+      host.appendChild(statTile('Dictations', fmtInt(todays.length), '', compareNote(todays.length, usualCount, v => fmtInt(v)), pct(todays.length, usualCount)));
+      host.appendChild(statTile('Pace', pace ? fmtInt(pace) : '—', pace ? 'wpm' : '', usualPace ? (pace ? compareNote(pace, usualPace, v => `${fmtInt(v)} wpm`) : `Usually ${fmtInt(usualPace)} wpm`) : '', pct(pace, usualPace)));
+      const s = formatMinutes(saved);
+      host.appendChild(statTile('Time saved', saved > 0 ? s.v : '—', saved > 0 ? s.u : '', 'Compared with typing at 40 wpm', false));
+      $('#today-meta').textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+    }
+
+    function renderChart(entries) {
+      const host = $('#home-chart'), axis = $('#home-chart-axis'); host.innerHTML = ''; axis.innerHTML = '';
+      const today = dayStart(Date.now()), days = [];
+      for (let i = 29; i >= 0; i--) { const d = new Date(today); d.setDate(d.getDate() - i); days.push({ t: d.getTime(), words: 0, count: 0 }); }
+      const index = new Map(days.map((d, i) => [d.t, i]));
+      for (const e of entries) { const i = index.get(dayStart(e.timestamp)); if (i !== undefined) { days[i].words += e.words || 0; days[i].count++; } }
+      const max = Math.max(1, ...days.map(d => d.words)), total = days.reduce((s, d) => s + d.words, 0);
+      $('#chart-meta').textContent = `${fmtInt(total)} ${plural(total, 'word')}`;
+      for (const d of days) {
+        const b = document.createElement('div'); b.className = 'b' + (d.words ? ' has' : '') + (d.t === today ? ' today' : '');
+        b.style.height = d.words ? Math.max(4, Math.round(d.words / max * 100)) + '%' : '2px';
+        const label = new Date(d.t).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+        const html = `<strong>${escapeHtml(label)}</strong><br>${fmtInt(d.words)} ${plural(d.words, 'word')} · ${d.count} ${plural(d.count, 'dictation')}`;
+        b.addEventListener('mousemove', ev => showTip(ev, html)); b.addEventListener('mouseleave', hideTip);
+        host.appendChild(b);
+      }
+      const fmt = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      for (const txt of [fmt(days[0].t), fmt(days[15].t), 'Today']) { const s = document.createElement('span'); s.textContent = txt; axis.appendChild(s); }
+    }
+
+    function renderHistory(entries) {
+      // Re-rendering replaces every row, so a row the keyboard was on gets
+      // its focus back afterwards (a new dictation mustn't throw a keyboard
+      // user back to the top of the page).
+      const host = $('#home-history-list');
+      const active = document.activeElement;
+      const focusedKey = active && active.classList && active.classList.contains('row') ? active.dataset.key : null;
+      host.innerHTML = '';
+      if (!entries.length) { host.innerHTML = '<div class="card empty">No dictations yet.</div>'; return; }
+      const groups = new Map();
+      for (const e of [...entries].reverse().slice(0, 60)) {
+        const t = new Date(e.timestamp); if (isNaN(t)) continue;
+        const label = friendlyDay(t); if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push({ entry: e, time: t });
+      }
+      for (const [label, items] of groups) {
+        const group = document.createElement('div'); group.className = 'day-group';
+        const head = document.createElement('div'); head.className = 'day-label'; head.textContent = label;
+        const card = document.createElement('div'); card.className = 'card';
+        for (const { entry, time } of items) {
+          const row = document.createElement('div'); row.className = 'row';
+          const tm = document.createElement('span'); tm.className = 'time';
+          tm.textContent = time.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+          const tx = document.createElement('span'); tx.className = 'text'; tx.textContent = entry.text || '';
+          const ic = document.createElement('span'); ic.className = 'ic';
+          if (entry.app_name) { ic.appendChild(appIcon(entry.app_name, entry.app_exe)); ic.title = entry.app_name; }
+          row.append(tm, tx, ic);
+          // A row copies its text on click - and, for the keyboard, on Enter or Space.
+          const preview = (entry.text || '').slice(0, 120);
+          row.tabIndex = 0; row.setAttribute('role', 'button'); row.setAttribute('aria-label', 'Copy: ' + preview);
+          row.dataset.key = historyKey(entry);
+          row.addEventListener('click', () => copyToClipboard(entry.text || ''));
+          row.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); copyToClipboard(entry.text || ''); }
+          });
+          card.appendChild(row);
+        }
+        group.append(head, card); host.appendChild(group);
+      }
+      restoreHistoryFocus(host, focusedKey);
+    }
+    function restoreHistoryFocus(host, key) {
+      if (!key) return;
+      const row = [...host.querySelectorAll('.row')].find(r => r.dataset.key === key);
+      if (row) row.focus({ preventScroll: true });
+    }
+
+    function renderHome() {
+      const entries = state.entries;
+      $('#greeting').textContent = greeting((state.config.user_name || '').trim());
+      const today = dayStart(Date.now());
+      const todays = entries.filter(e => dayStart(e.timestamp) === today);
+      const w = sumWords(todays);
+      $('#home-sub').textContent = todays.length
+        ? `${fmtInt(w)} ${plural(w, 'word')} across ${todays.length} ${plural(todays.length, 'dictation')} today.`
+        : entries.length ? 'Nothing dictated yet today.' : 'Your dictations will show up here.';
+      renderLive(); renderToday(entries, todays); renderChart(entries); renderHistory(entries);
+    }
+
+    // ===== INSIGHTS ===========================================
+    function metricCard(id, label, big, unit, desc) {
+      const card = $(id); card.innerHTML = '';
+      const l = document.createElement('div'); l.className = 'label'; l.textContent = label;
+      const b = document.createElement('div'); b.className = 'big'; b.textContent = big;
+      if (unit) { const u = document.createElement('span'); u.className = 'unit'; u.textContent = unit; b.appendChild(u); }
+      card.append(l, b);
+      if (desc) { const d = document.createElement('div'); d.className = 'desc'; d.textContent = desc; card.appendChild(d); }
+      return card;
+    }
+    function foot(card, text) { const f = document.createElement('div'); f.className = 'foot'; f.textContent = text; card.appendChild(f); }
+    function median(sorted) { return sorted.length ? sorted[Math.floor((sorted.length - 1) / 2)] : 0; }
+
+    function renderSummary(E) {
+      const host = $('#ins-summary'); host.innerHTML = '';
+      const t = formatMinutes(sumSeconds(E) / 60), s = formatMinutes(savedMinutes(E));
+      host.appendChild(statTile('Words', formatBigNumber(sumWords(E)), '', `${fmtInt(sumWords(E))} in total`));
+      host.appendChild(statTile('Dictations', fmtInt(E.length), '', E.length ? `${fmtInt(sumWords(E) / E.length)} words on average` : ''));
+      host.appendChild(statTile('Time speaking', t.v, t.u, ''));
+      host.appendChild(statTile('Time saved', s.v, s.u, 'Compared with typing at 40 wpm'));
+      const first = E.find(e => !isNaN(new Date(e.timestamp)));
+      $('#ins-since').textContent = first ? `Since ${new Date(first.timestamp).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })}` : '';
+    }
+
+    function renderPace(E) {
+      const today = dayStart(Date.now()), since = today - 29 * 86400000;
+      const recent = E.filter(e => dayStart(e.timestamp) >= since && e.duration > 1);
+      const avg = avgWPM(recent);
+      const card = metricCard('#ins-pace', 'Speaking pace · last 30 days', avg ? fmtInt(avg) : '—', avg ? 'wpm' : '',
+        avg ? `About ${Math.round(avg / 40 * 10) / 10}× faster than typing at 40 wpm.` : 'Your pace shows up after a few dictations.');
+      // A sparkline of each active day's pace.
+      const days = new Map();
+      for (const e of recent) { const t = dayStart(e.timestamp); if (!days.has(t)) days.set(t, []); days.get(t).push(e); }
+      const pts = [...days.entries()].sort((a, b) => a[0] - b[0]).map(([t, list]) => ({ t, v: avgWPM(list) })).filter(p => p.v > 0);
+      if (pts.length >= 2) {
+        const W = 300, H = 52, lo = Math.min(...pts.map(p => p.v)), hi = Math.max(...pts.map(p => p.v)), span = Math.max(1, hi - lo);
+        const x = p => ((p.t - since) / (29 * 86400000)) * (W - 8) + 4, y = p => H - 6 - ((p.v - lo) / span) * (H - 14);
+        const line = pts.map(p => `${x(p).toFixed(1)},${y(p).toFixed(1)}`).join(' ');
+        const area = `M${x(pts[0]).toFixed(1)},${H} L${line.replace(/ /g, ' L')} L${x(pts[pts.length - 1]).toFixed(1)},${H} Z`;
+        const last = pts[pts.length - 1];
+        card.insertAdjacentHTML('beforeend', `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><path class="area" d="${area}"/><polyline class="line" points="${line}"/><circle class="dotp" cx="${x(last).toFixed(1)}" cy="${y(last).toFixed(1)}" r="2.5"/></svg>`);
+        foot(card, `Range ${fmtInt(lo)}–${fmtInt(hi)} wpm across ${pts.length} active days`);
+      }
+    }
+
+    function renderSpeed(E) {
+      const timed = E.filter(e => typeof e.latency === 'number').slice(-100);
+      if (!timed.length) { metricCard('#ins-speed', 'Time to text', '—', '', 'From letting go of the hotkey to your words appearing. Scribe starts timing with your next dictation.'); return; }
+      const sorted = timed.map(e => e.latency).sort((a, b) => a - b);
+      const p90 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))];
+      const card = metricCard('#ins-speed', 'Time to text · typical', median(sorted).toFixed(2), 's',
+        `9 in 10 of your last ${timed.length} ${plural(timed.length, 'dictation')} landed within ${p90.toFixed(2)} s of letting go.`);
+      const buckets = [['< 0.5 s', 0, 0.5], ['0.5–0.7 s', 0.5, 0.7], ['0.7–1 s', 0.7, 1], ['1–2 s', 1, 2], ['> 2 s', 2, Infinity]];
+      const dist = document.createElement('div'); dist.className = 'dist';
+      for (const [label, lo, hi] of buckets) {
+        const n = sorted.filter(v => v >= lo && v < hi).length, pct = n / sorted.length * 100;
+        const row = document.createElement('div'); row.className = 'dist-row';
+        row.innerHTML = `<span></span><div class="meter"><div class="fill" style="width:${pct.toFixed(1)}%"></div></div><span class="n">${n}</span>`;
+        row.firstChild.textContent = label; dist.appendChild(row);
+      }
+      card.appendChild(dist);
+      const by = new Map();
+      for (const e of timed) { if (!e.engine) continue; if (!by.has(e.engine)) by.set(e.engine, []); by.get(e.engine).push(e.latency); }
+      if (by.size > 1) foot(card, [...by.entries()].map(([k, v]) => `${ENGINE_NAMES[k] || k} ${median(v.sort((a, b) => a - b)).toFixed(2)} s`).join(' · '));
+    }
+
+    function renderPolish(E) {
+      if (state.config.polish === false) { metricCard('#ins-polish', 'AI polish', 'Off', '', 'Turn it on in Settings to have each dictation tidied up — grammar, punctuation, false starts.'); return; }
+      // Counted from the first dictation polish changed, so the weeks before
+      // polish existed don't water the share down. (Polish skips very short
+      // takes, so those don't count either.)
+      const first = E.findIndex(e => e.polished);
+      const recent = first < 0 ? [] : E.slice(first).filter(e => (e.words || 0) >= 4).slice(-200);
+      if (!recent.length) { metricCard('#ins-polish', 'AI polish', '—', '', 'Once polish tidies a dictation, you’ll see how often it helps here. It needs the cloud on and a Groq key.'); return; }
+      const polished = recent.filter(e => e.polished);
+      const removed = polished.reduce((s, e) => s + Math.max(0, wordCount(e.raw) - wordCount(e.text)), 0);
+      const pct = Math.round(polished.length / recent.length * 100);
+      const card = metricCard('#ins-polish', 'AI polish · recent dictations', `${pct}%`, 'tidied',
+        `${polished.length} of your last ${recent.length} ${plural(recent.length, 'dictation')} changed — ${fmtInt(removed)} filler ${plural(removed, 'word')} and false starts removed.`);
+      const dist = document.createElement('div'); dist.className = 'dist';
+      for (const [label, n] of [['Tidied', polished.length], ['As you said it', recent.length - polished.length]]) {
+        const row = document.createElement('div'); row.className = 'dist-row';
+        row.innerHTML = `<span></span><div class="meter"><div class="fill" style="width:${(n / recent.length * 100).toFixed(1)}%"></div></div><span class="n">${n}</span>`;
+        row.firstChild.textContent = label; dist.appendChild(row);
+      }
+      card.appendChild(dist);
+      foot(card, 'On Home, “Show what you said” shows a dictation before polish.');
+    }
+
+    function renderHours(E) {
+      const counts = new Array(24).fill(0);
+      for (const e of E) { const d = new Date(e.timestamp); if (!isNaN(d)) counts[d.getHours()]++; }
+      const total = counts.reduce((a, b) => a + b, 0);
+      if (!total) { metricCard('#ins-hours', 'When you dictate', '—', '', 'Your busiest hours show up here.'); return; }
+      const peak = counts.indexOf(Math.max(...counts)), max = counts[peak];
+      const card = metricCard('#ins-hours', 'When you dictate', formatHour(peak), '', `Your busiest hour — ${Math.round(max / total * 100)}% of all your dictations start then.`);
+      const bars = document.createElement('div'); bars.className = 'hours';
+      counts.forEach((c, h) => {
+        const b = document.createElement('div'); b.className = 'b' + (c ? ' has' : '') + (h === peak ? ' peak' : '');
+        b.style.height = c ? Math.max(6, Math.round(c / max * 100)) + '%' : '2px';
+        const html = `<strong>${formatHour(h)}</strong><br>${c} ${plural(c, 'dictation')}`;
+        b.addEventListener('mousemove', ev => showTip(ev, html)); b.addEventListener('mouseleave', hideTip);
+        bars.appendChild(b);
+      });
+      card.appendChild(bars);
+      const axis = document.createElement('div'); axis.className = 'axis';
+      for (const t of ['12 a.m.', '6 a.m.', '12 p.m.', '6 p.m.', '11 p.m.']) { const s = document.createElement('span'); s.textContent = t; axis.appendChild(s); }
+      card.appendChild(axis);
+    }
+
+    function renderApps(E) {
+      const by = new Map();
+      for (const e of E) {
+        if (!e.app_name) continue;
+        let b = by.get(e.app_name); if (!b) { b = { name: e.app_name, exe: e.app_exe || null, count: 0, words: 0 }; by.set(e.app_name, b); }
+        b.count++; b.words += e.words || 0;
+      }
+      const rows = [...by.values()].sort((a, b) => b.words - a.words).slice(0, 6);
+      if (!rows.length) { metricCard('#ins-apps', 'Where you dictate', '—', '', 'The apps you dictate into show up here.'); return; }
+      const total = [...by.values()].reduce((s, r) => s + r.words, 0) || 1;
+      const card = metricCard('#ins-apps', 'Where you dictate', rows[0].name, '', `${Math.round(rows[0].words / total * 100)}% of your words go here.`);
+      card.querySelector('.big').style.fontSize = '22px';
+      const list = document.createElement('div'); list.className = 'apps';
+      for (const r of rows) {
+        const row = document.createElement('div'); row.className = 'app-row';
+        const name = document.createElement('span'); name.className = 'name'; name.textContent = r.name;
+        const meter = document.createElement('div'); meter.className = 'meter';
+        meter.innerHTML = `<div class="fill" style="width:${Math.max(3, Math.round(r.words / rows[0].words * 100))}%"></div>`;
+        const n = document.createElement('span'); n.className = 'n'; n.textContent = formatBigNumber(r.words);
+        row.append(appIcon(r.name, r.exe), name, meter, n); list.appendChild(row);
+      }
+      card.appendChild(list);
+    }
+
+    function streaks(E) {
+      const days = new Set(E.map(e => dayStart(e.timestamp)).filter(t => !isNaN(t)));
+      const sorted = [...days].sort((a, b) => a - b);
+      let best = 0, cur = 0, prev = null;
+      for (const t of sorted) { cur = prev !== null && Math.round((t - prev) / 86400000) === 1 ? cur + 1 : 1; best = Math.max(best, cur); prev = t; }
+      // The current run ends today - or yesterday, so it doesn't read 0 every
+      // morning before your first dictation.
+      let run = 0, d = dayStart(Date.now());
+      if (!days.has(d)) d -= 86400000;
+      while (days.has(d)) { run++; d = dayStart(d - 43200000); }
+      return { days, best, run };
+    }
+
+    function renderConsistency(E) {
+      const { days, best, run } = streaks(E);
+      const card = metricCard('#ins-consistency', 'Consistency · last 12 weeks', `${run}`, run === 1 ? 'day in a row' : 'days in a row',
+        best ? `Your longest run is ${best} ${plural(best, 'day')}.` : 'Dictate on a few days to see your rhythm.');
+      const counts = new Map();
+      for (const e of E) { const t = dayStart(e.timestamp); if (!isNaN(t)) counts.set(t, (counts.get(t) || 0) + 1); }
+      const today = dayStart(Date.now()), end = new Date(today);
+      end.setDate(end.getDate() + (7 - (end.getDay() === 0 ? 7 : end.getDay())));      // the Sunday ending this week
+      const start = new Date(end); start.setDate(start.getDate() - (12 * 7 - 1));
+      const busiest = Math.max(1, ...counts.values());
+      const grid = document.createElement('div'); grid.className = 'heat';
+      for (let i = 0; i < 12 * 7; i++) {
+        const dt = new Date(start); dt.setDate(dt.getDate() + i);
+        const cell = document.createElement('div'); cell.className = 'heat-cell';
+        const t = dt.getTime();
+        if (t > today) cell.classList.add('future');
+        else {
+          const c = counts.get(t) || 0;
+          if (c) cell.classList.add('l' + Math.min(4, 1 + Math.floor((c - 1) / busiest * 4)));
+          const html = `<strong>${escapeHtml(dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }))}</strong><br>${c} ${plural(c, 'dictation')}`;
+          cell.addEventListener('mousemove', ev => showTip(ev, html)); cell.addEventListener('mouseleave', hideTip);
+        }
+        grid.appendChild(cell);
+      }
+      card.appendChild(grid);
+      foot(card, `${days.size} active ${plural(days.size, 'day')} in all`);
+    }
+
+    function renderTopWords(E) {
+      const counter = new Map();
+      for (const e of E) for (const w of tokenize(e.text || '')) {
+        if (w.length < 3 || STOP_WORDS.has(w)) continue;
+        counter.set(w, (counter.get(w) || 0) + 1);
+      }
+      const top = [...counter.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+      const host = $('#ins-words-list'); host.innerHTML = '';
+      $('#ins-words-panel').hidden = !top.length;
+      for (const [word, count] of top) {
+        const row = document.createElement('div'); row.className = 'word-row';
+        const w = document.createElement('span'); w.textContent = word;
+        const n = document.createElement('span'); n.className = 'n'; n.textContent = fmtInt(count);
+        row.append(w, n); host.appendChild(row);
+      }
+    }
+
+    function renderInsights() {
+      const E = state.entries;
+      renderSummary(E); renderPace(E); renderSpeed(E); renderPolish(E);
+      renderHours(E); renderApps(E); renderConsistency(E); renderTopWords(E);
+    }
+
+    // ===== USAGE (Settings) ===================================
+    function formatAudioSec(seconds) {
+      const s = Math.max(0, Math.round(Number(seconds) || 0));
+      if (s < 60) return `${s}s`;
+      if (s < 3600) { const m = Math.floor(s / 60), rem = s % 60; return rem ? `${m}m ${rem}s` : `${m}m`; }
+      const h = s / 3600; return (h < 10 ? h.toFixed(1) : Math.round(h)) + 'h';
+    }
+    function formatHours(h) { return h < 1 ? `${Math.max(1, Math.round(h * 60))} min` : `${h.toFixed(1)} h`; }
+
+    // ElevenLabs' month: the share of credits used (when the key may read
+    // them), about how long that lasts, when it resets, and the time Scribe
+    // streamed since the month began. Returns whether it's shown.
+    function renderElevenUsage() {
+      const u = state.eleven, box = $('#eleven-usage');
+      const on = state.config.cloud_provider === 'elevenlabs' && !!state.config.elevenlabs_key_hint;
+      if (!on || !u || u.status === 'none' || u.status === 'rejected') { box.hidden = true; return false; }
+      box.hidden = false;
+      const hasNumbers = u.limit > 0 && typeof u.used === 'number';
+      $('#eleven-row').hidden = !hasNumbers;
+      const bits = [];
+      if (hasNumbers) {
+        const ratio = u.used / u.limit, pct = Math.min(100, ratio * 100);
+        const tone = ratio >= 0.9 ? 'danger' : (ratio >= 0.7 ? 'warn' : '');
+        const fill = $('#eleven-fill'); fill.className = 'fill' + (tone ? ' ' + tone : ''); fill.style.width = pct.toFixed(1) + '%';
+        const num = $('#eleven-num'); num.className = 'n' + (tone ? ' ' + tone : '');
+        while (num.firstChild) num.removeChild(num.firstChild);
+        const strong = document.createElement('strong'); strong.textContent = `${Math.round(pct)}%`;
+        num.appendChild(strong); num.appendChild(document.createTextNode(' used'));
+        if (typeof u.hours_left === 'number') bits.push(`about ${formatHours(u.hours_left)} left`);
+        if (u.resets_at) bits.push(`resets ${new Date(u.resets_at * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`);
+      }
+      bits.push(`${formatAudioSec(u.dictated_seconds || 0)} dictated this month`);
+      if (u.stale) bits.push('not updated');
+      else if (!hasNumbers && (u.status === 'offline' || u.status === 'error')) bits.push('couldn\'t reach ElevenLabs');
+      let note = bits.join(' · '); note = note.charAt(0).toUpperCase() + note.slice(1);
+      if (u.status === 'no_permission') note += ' · To see what\'s left, allow your key to read account info (User → Read) at elevenlabs.io.';
+      $('#eleven-note').textContent = note;
+      return true;
+    }
+
+    // Ask for ElevenLabs' numbers (a network call, so every 5 minutes - not
+    // on every poll). Offline keeps the last good numbers, marked stale.
+    async function refreshElevenUsage() {
+      const c = state.config;
+      if (c.cloud_provider !== 'elevenlabs' || !c.elevenlabs_key_hint) { state.eleven = null; renderCloudUsage(); return; }
+      let u;
+      try { u = await window.pywebview.api.get_elevenlabs_usage(); }
+      catch (e) { console.error('get_elevenlabs_usage failed:', e); return; }
+      const prev = state.eleven;
+      if (u && (u.status === 'offline' || u.status === 'error') && prev && prev.limit > 0) {
+        u = Object.assign({}, prev, { dictated_seconds: u.dictated_seconds, stale: true });
+      }
+      state.eleven = u || null; renderCloudUsage();
+    }
+
+    function renderCloudUsage() {
+      const panel = $('#cloud-panel'), data = state.cloud;
+      const groqShown = !!(data && data.total_calls);
+      const elevenShown = renderElevenUsage();
+      $('#groq-sub').hidden = !(groqShown && elevenShown);
+      panel.hidden = !(groqShown || elevenShown);
+      const rowsHost = $('#cloud-rows'); while (rowsHost.firstChild) rowsHost.removeChild(rowsHost.firstChild);
+      if (elevenShown) {
+        const tier = state.eleven && state.eleven.tier ? ` · ${state.eleven.tier}` : '';
+        $('#cloud-meta').textContent = `ElevenLabs${tier}`;
+      }
+      if (!groqShown) return;
+      const limits = data.limits || {};
+      const isAudio = k => k === 'hour_audio_seconds' || k === 'day_audio_seconds';
+      const rows = [
+        { key: 'minute_requests', label: 'Requests / minute' }, { key: 'day_requests', label: 'Requests / day' },
+        { key: 'hour_audio_seconds', label: 'Audio sent / hour' }, { key: 'day_audio_seconds', label: 'Audio sent / day' },
+      ];
+      for (const r of rows) {
+        const value = Number(data[r.key]) || 0, limit = Number(limits[r.key]) || 0;
+        const ratio = limit > 0 ? value / limit : 0, pct = Math.min(100, ratio * 100);
+        const tone = ratio >= 0.9 ? 'danger' : (ratio >= 0.7 ? 'warn' : '');
+        const valStr = isAudio(r.key) ? formatAudioSec(value) : formatBigNumber(value);
+        const limitStr = isAudio(r.key) ? formatAudioSec(limit) : formatBigNumber(limit);
+        const row = document.createElement('div'); row.className = 'usage-row';
+        const label = document.createElement('span'); label.className = 'w'; label.textContent = r.label;
+        const track = document.createElement('div'); track.className = 'tr';
+        const fill = document.createElement('div'); fill.className = 'fill' + (tone ? ' ' + tone : ''); fill.style.width = pct.toFixed(1) + '%'; track.appendChild(fill);
+        const numWrap = document.createElement('span'); numWrap.className = 'n';
+        const numStrong = document.createElement('strong'); numStrong.textContent = valStr;
+        numWrap.appendChild(numStrong); numWrap.appendChild(document.createTextNode(' / ' + limitStr));
+        row.appendChild(label); row.appendChild(track); row.appendChild(numWrap); rowsHost.appendChild(row);
+      }
+      const total = data.total_calls;
+      if (!elevenShown) $('#cloud-meta').textContent = `Groq free tier · ${formatBigNumber(total)} ${plural(total, 'call')} logged`;
+    }
+
+    // --- Toast + vocabulary actions --------------------------
+    function showToast(msg, ms = 1900, tone = '') {
+      const t = $('#history-copied'); if (!t) return;
+      t.textContent = msg;
+      t.classList.toggle('warn', tone === 'warn');
+      t.classList.add('show');
+      clearTimeout(window._toastTimer);
+      window._toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+    }
+    function vocabApi() { return (window.pywebview && window.pywebview.api) || null; }
+    async function vocabOp(promise, toastMsg) {
+      try {
+        const res = await promise;
+        if (res && res.vocab) { state.vocab = res.vocab; state.suggestions = res.suggestions || []; state.pendingSuggestions = null; renderDictionary(); }
+        if (toastMsg) showToast(toastMsg);
+      } catch (e) { console.error('vocab op failed:', e); showToast('Could not save — please try again', 3200, 'warn'); }
+    }
+    async function addTerm(term) {
+      const a = vocabApi(); if (!a || !term) return;
+      try {
+        const res = await a.add_vocab_term(term);
+        if (res && res.vocab) { state.vocab = res.vocab; state.suggestions = res.suggestions || []; state.pendingSuggestions = null; renderDictionary(); }
+        // Say what really happened: a new word, a new spelling, or nothing to do.
+        const msg = res && res.result === 'updated' ? `Updated to “${term}” — Scribe uses this spelling from your next dictation`
+                  : res && res.result === 'exists' ? `“${term}” is already in your words`
+                  : `Added “${term}” — Scribe uses it from your next dictation`;
+        showToast(msg);
+      } catch (e) { console.error('vocab op failed:', e); showToast('Could not save — please try again', 3200, 'warn'); }
+    }
+    function addCorrection(wrong, right) { const a = vocabApi(); if (a && wrong && right) vocabOp(a.add_vocab_correction(wrong, right), `Fixed “${wrong}” → “${right}” — live from your next dictation`); }
+    function removeTerm(term)          { const a = vocabApi(); if (a) vocabOp(a.remove_vocab_term(term), `Removed “${term}”`); }
+    function removeCorrection(wrong)   { const a = vocabApi(); if (a) vocabOp(a.remove_vocab_correction(wrong), `Removed the fix for “${wrong}”`); }
+    function dismissSuggestion(word)   { const a = vocabApi(); if (a) vocabOp(a.dismiss_suggestion(word), null); }
+
+    // A poll can bring new suggestions while you're typing a fix in a card;
+    // re-rendering then would pull the card out from under your cursor. So
+    // new suggestions wait until no fix box is open.
+    function suggestionEditing() { return !!document.querySelector('#dict-suggest-host .suggest-fix:not([hidden])'); }
+    function applySuggestions(list) {
+      const next = JSON.stringify(list || []);
+      if (next === state.suggestionsKey) { state.pendingSuggestions = null; return; }
+      state.pendingSuggestions = list || [];
+      if (suggestionEditing()) return;
+      state.suggestions = state.pendingSuggestions; state.pendingSuggestions = null;
+      renderSuggestions();
+    }
+
+    function renderSuggestions() {
+      const section = $('#dict-suggest-section'), host = $('#dict-suggest-host');
+      const sugs = state.suggestions || [];
+      state.suggestionsKey = JSON.stringify(sugs);
+      if (!sugs.length) { section.hidden = true; return; }
+      section.hidden = false;
+      $('#dict-suggest-count').textContent = `${sugs.length} to review`;
+      host.innerHTML = '';
+      for (const s of sugs) {
+        const card = document.createElement('div'); card.className = 'suggest-card';
+        card.innerHTML = `
+          <div class="suggest-main">
+            <div class="suggest-word"><span class="sw"></span><span class="sw-count"></span></div>
+            <div class="suggest-sample"></div>
+          </div>
+          <div class="suggest-actions">
+            <button class="sg-btn sg-fix">Should be…</button>
+            <button class="sg-btn sg-add">I say it that way</button>
+            <button class="sg-btn sg-dismiss">Dismiss</button>
+          </div>
+          <div class="suggest-fix" hidden>
+            <input type="text" spellcheck="false" />
+            <button class="sg-btn primary sg-fix-save">Save fix</button>
+            <button class="sg-btn sg-fix-cancel">Cancel</button>
+          </div>`;
+        card.querySelector('.sw').textContent = s.word;
+        card.querySelector('.sw-count').textContent = `said ${s.count} ${plural(s.count, 'time')}`;
+        card.querySelector('.suggest-sample').textContent = s.sample || '';
+        const fix = card.querySelector('.suggest-fix'), input = fix.querySelector('input');
+        const actions = card.querySelector('.suggest-actions');
+        const closeFix = () => {
+          fix.hidden = true; actions.hidden = false;
+          if (state.pendingSuggestions) applySuggestions(state.pendingSuggestions);
+        };
+        card.querySelector('.sg-fix').addEventListener('click', () => {
+          fix.hidden = false; actions.hidden = true; input.value = s.word; input.focus(); input.select();
+        });
+        card.querySelector('.sg-fix-cancel').addEventListener('click', closeFix);
+        card.querySelector('.sg-fix-save').addEventListener('click', () => {
+          const v = input.value.trim(); if (!v) return;
+          // Same letters, same case → it was heard right: just a term.
+          // Anything else (even only the capitals) → a correction, so the
+          // output is fixed, not only hinted to Whisper.
+          if (v === s.word) addTerm(v); else addCorrection(s.word, v);
+        });
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); card.querySelector('.sg-fix-save').click(); }
+          else if (e.key === 'Escape') closeFix();
+        });
+        card.querySelector('.sg-add').addEventListener('click', () => addTerm(s.word));
+        card.querySelector('.sg-dismiss').addEventListener('click', () => dismissSuggestion(s.word));
+        host.appendChild(card);
+      }
+    }
+
+    function renderDictionary() {
+      renderSuggestions();
+      const terms = state.vocab.terms || [], corrections = state.vocab.corrections || [];
+      $('#dict-terms-count').textContent = `${terms.length} ${plural(terms.length, 'word')}`;
+      $('#dict-corr-count').textContent = `${corrections.length} ${plural(corrections.length, 'correction')}`;
+
+      const tHost = $('#dict-terms-host'); tHost.innerHTML = ''; tHost.className = terms.length ? 'chips' : '';
+      if (!terms.length) tHost.innerHTML = '<div class="card empty">Nothing here yet — add a word above or accept a suggestion.</div>';
+      else for (const t of terms) {
+        const chip = document.createElement('span'); chip.className = 'chip';
+        const lbl = document.createElement('span'); lbl.className = 'chip-label'; lbl.textContent = t;
+        const x = document.createElement('button'); x.className = 'chip-x'; x.title = 'Remove'; x.setAttribute('aria-label', `Remove ${t}`); x.textContent = '✕';
+        x.addEventListener('click', () => removeTerm(t));
+        chip.appendChild(lbl); chip.appendChild(x); tHost.appendChild(chip);
+      }
+
+      const cHost = $('#dict-corr-host'); cHost.innerHTML = '';
+      if (!corrections.length) cHost.innerHTML = '<div class="empty">Nothing here yet — teach Scribe a fix from a suggestion above.</div>';
+      else for (const [wrong, right] of corrections) {
+        const row = document.createElement('div'); row.className = 'corr-row';
+        row.innerHTML = `<span class="wrong"></span><span class="arrow">→</span><span class="right"></span><button class="corr-x" title="Remove">✕</button>`;
+        row.querySelector('.wrong').textContent = wrong; row.querySelector('.right').textContent = right;
+        row.querySelector('.corr-x').setAttribute('aria-label', `Remove the fix for ${wrong}`);
+        row.querySelector('.corr-x').addEventListener('click', () => removeCorrection(wrong));
+        cHost.appendChild(row);
+      }
+    }
+
+    // ===== SETTINGS ===========================================
+    function renderSettings() {
+      const c = state.config;
+      const fill = (sel, opts, selected) => {
+        const el = $(sel); el.innerHTML = '';
+        for (const opt of opts) { const o = document.createElement('option'); o.value = opt; o.textContent = opt;
+          if (opt === selected) o.selected = true;
+          el.appendChild(o); }
+      };
+      fill('#set-hotkey', state.choices.hotkeys, c.hotkey);
+      fill('#set-model', state.choices.models, c.model_size);
+      const micEl = $('#set-mic'); micEl.innerHTML = '';
+      const saved = c.mic_device || '';
+      for (const name of state.choices.mics) {
+        const o = document.createElement('option'); o.value = name; o.textContent = name;
+        if (name === saved || (name === '(system default)' && !saved)) o.selected = true;
+        micEl.appendChild(o);
+      }
+      if (saved && !state.choices.mics.includes(saved)) {
+        // Your mic isn't plugged in right now - keep it selected rather than
+        // silently switching you to the default on the next save.
+        const o = document.createElement('option'); o.value = saved;
+        o.textContent = `${saved} (not connected)`; o.selected = true; micEl.appendChild(o);
+      }
+      $('#set-name').value = c.user_name || '';
+      $('#set-provider').value = c.cloud_provider === 'elevenlabs' ? 'elevenlabs' : 'groq';
+      renderKeyRow('groq'); renderKeyRow('elevenlabs');
+      setToggle('set-login', !!c.start_at_login);
+      // null = a test / portable copy: sign-in isn't Scribe's to manage here.
+      $('#set-login').closest('.toggle-field').hidden = c.start_at_login === null;
+      setToggle('set-backup', c.local_model !== false);
+      setToggle('set-trailing', c.add_trailing_space);
+      setToggle('set-paste', c.paste_mode);
+      setToggle('set-sound-cues', c.sound_cues !== false);
+      setToggle('set-cloud', c.use_cloud);
+      setToggle('set-pipeline', c.pipeline_cloud !== false);
+      setToggle('set-polish', c.polish !== false);
+      setPolishStyle(c.polish_style);
+      setToggle('set-updates', c.check_updates !== false);
+      $('#about-version').textContent = state.appVersion;
+      applyTheme(c.theme);
+      updateBackupRow(); updateCloudRows(); updatePolishRow();
+      // The status line names the service until the app's own status arrives.
+      $('#plan-badge').textContent = !c.use_cloud ? ENGINE_NAMES.local
+        : c.cloud_provider === 'elevenlabs' ? 'ElevenLabs' : 'Groq';
+    }
+
+    // The keys themselves never reach this page - only "ends in 1a2b". To
+    // change one you Replace (type a new one, checked with its service on
+    // Save) or Remove.
+    const KEY_ROWS = {
+      groq:       { id: 'set-key',  hint: 'groq_key_hint',       name: 'Groq' },
+      elevenlabs: { id: 'set-ekey', hint: 'elevenlabs_key_hint', name: 'ElevenLabs' },
+    };
+    const KEY_CHECKS = {
+      groq:       (key) => window.pywebview.api.check_groq_key(key),
+      elevenlabs: (key) => window.pywebview.api.check_elevenlabs_key(key),
+    };
+    function renderKeyRow(service) {
+      const row = KEY_ROWS[service], hint = state.config[row.hint] || '';
+      state.keyAction[service] = null;
+      const saved = $(`#${row.id}-saved`), input = $(`#${row.id}`);
+      input.value = '';
+      saved.classList.remove('removing');
+      saved.textContent = hint ? `Saved · ${hint}` : '';
+      saved.hidden = !hint; input.hidden = !!hint;
+      $(`#${row.id}-replace`).hidden = !hint; $(`#${row.id}-remove`).hidden = !hint;
+    }
+
+    function setToggle(id, on) {
+      // The class drives the look; aria-checked tells screen readers.
+      const t = document.getElementById(id);
+      t.classList.toggle('on', !!on); t.setAttribute('aria-checked', on ? 'true' : 'false');
+    }
+    function toggleValue(id) { return document.getElementById(id).classList.contains('on'); }
+    // Toggles are <button role="switch">s: a click, Space or Enter flips them.
+    $$('.toggle').forEach(t => {
+      t.setAttribute('aria-checked', t.classList.contains('on') ? 'true' : 'false');
+      t.addEventListener('click', () => setToggle(t.id, !t.classList.contains('on')));
+    });
+
+    for (const [service, row] of Object.entries(KEY_ROWS)) {
+      $(`#${row.id}-replace`).addEventListener('click', () => {
+        state.keyAction[service] = 'replace';
+        $(`#${row.id}-saved`).hidden = true; $(`#${row.id}-replace`).hidden = true; $(`#${row.id}-remove`).hidden = true;
+        $(`#${row.id}`).hidden = false; $(`#${row.id}`).focus();
+      });
+      $(`#${row.id}-remove`).addEventListener('click', () => {
+        state.keyAction[service] = 'remove';
+        const s = $(`#${row.id}-saved`); s.textContent = 'Removed when you save'; s.classList.add('removing');
+        $(`#${row.id}-remove`).hidden = true;
+      });
+    }
+    // ElevenLabs' key only matters when it's the service, Groq's pipeline
+    // only when Groq is - and then Groq's key is the optional backup.
+    function updateCloudRows() {
+      const eleven = $('#set-provider').value === 'elevenlabs';
+      $('#set-ekey-field').hidden = !eleven;
+      $('#set-pipeline-row').hidden = eleven;
+      $('#set-key-help').textContent = eleven
+        ? 'Optional: the backup when ElevenLabs can\'t answer, and AI polish (your text is sent to Groq). Free at console.groq.com/keys.'
+        : 'Get one free at console.groq.com/keys.';
+    }
+    $('#set-provider').addEventListener('change', updateCloudRows);
+    // The offline backup only means something with the cloud on. (The
+    // generic .toggle click handler above has already flipped the class.)
+    function updateBackupRow() { $('#set-backup-row').hidden = !toggleValue('set-cloud'); }
+    $('#set-cloud').addEventListener('click', updateBackupRow);
+
+    // AI polish's style: Light keeps every word you say but the "um"s; Full
+    // also smooths false starts and rambling. Saved with the other settings.
+    const POLISH_STYLE_HELP = {
+      light: 'Fixes punctuation and capitals and drops the “um”s. Every other word you say stays.',
+      full: 'Also smooths false starts and rambling, like Wispr Flow. It never adds words you didn’t say.',
+    };
+    function setPolishStyle(style) {
+      state.polishStyle = style === 'light' ? 'light' : 'full';
+      $$('#set-polish-style button').forEach(b => {
+        const on = b.dataset.style === state.polishStyle;
+        b.classList.toggle('on', on); b.setAttribute('aria-checked', on ? 'true' : 'false');
+      });
+      $('#set-polish-style-help').textContent = POLISH_STYLE_HELP[state.polishStyle];
+    }
+    $$('#set-polish-style button').forEach(b => b.addEventListener('click', () => setPolishStyle(b.dataset.style)));
+    // The style only means something with polish on.
+    function updatePolishRow() { $('#set-polish-style-row').hidden = !toggleValue('set-polish'); }
+    $('#set-polish').addEventListener('click', updatePolishRow);
+
+    // "Saved — but your key couldn't be saved": a warning continues the
+    // sentence, so its first letter goes lowercase - unless it's a name.
+    function butClause(text) {
+      const first = (text.split(/\s/)[0] || '').replace(/[^A-Za-z]/g, '');
+      const names = ['Windows', 'Groq', 'ElevenLabs', 'Scribe', 'Credential', 'Task', 'Microsoft'];
+      return names.includes(first) ? text : text.charAt(0).toLowerCase() + text.slice(1);
+    }
+
+    function showSaveStatus(text, tone = '') {
+      const s = $('#set-status'); s.textContent = text;
+      s.classList.toggle('error', tone === 'error'); s.classList.toggle('warn', tone === 'warn'); s.classList.add('show');
+      clearTimeout(window._statusTimer);
+      window._statusTimer = setTimeout(() => s.classList.remove('show'), tone ? 6000 : 3000);
+    }
+
+    $('#set-save').addEventListener('click', async () => {
+      const mic = $('#set-mic').value, cloud = toggleValue('set-cloud');
+      const payload = {
+        user_name: $('#set-name').value.trim(), hotkey: $('#set-hotkey').value,
+        model_size: $('#set-model').value, mic_device: mic === '(system default)' ? null : mic,
+        add_trailing_space: toggleValue('set-trailing'), paste_mode: toggleValue('set-paste'),
+        sound_cues: toggleValue('set-sound-cues'), use_cloud: cloud,
+        cloud_provider: $('#set-provider').value,
+        pipeline_cloud: toggleValue('set-pipeline'),
+        polish: toggleValue('set-polish'), polish_style: state.polishStyle,
+        check_updates: toggleValue('set-updates'),
+        local_model: cloud ? toggleValue('set-backup') : true,
+      };
+      if (state.config.start_at_login !== null) payload.start_at_login = toggleValue('set-login');
+      let warn = '';
+      for (const [service, row] of Object.entries(KEY_ROWS)) {
+        // (The ElevenLabs field is hidden while Groq is the service: a key
+        // left typed in it isn't checked or saved.)
+        const offScreen = service === 'elevenlabs' && $('#set-ekey-field').hidden;
+        const newKey = ($(`#${row.id}`).hidden || offScreen) ? '' : $(`#${row.id}`).value.trim();
+        if (newKey) {
+          // Check a new key with its service BEFORE saving it: a rejected
+          // key is never saved; an unreachable service saves it with a warning.
+          showSaveStatus('Checking your key…');
+          let r;
+          try { r = await KEY_CHECKS[service](newKey); }
+          catch (e) { r = { status: 'error', message: 'Couldn\'t check the key.' }; }
+          if (r.status === 'rejected' || r.status === 'error') { showSaveStatus(`Not saved — ${r.message}`, 'error'); return; }
+          if (r.status === 'offline') warn = `Saved — but Scribe couldn't reach ${row.name} to check the key.`;
+          payload[`${service}_api_key`] = newKey;
+        } else if (state.keyAction[service] === 'remove') {
+          payload[`remove_${service}_key`] = true;
+        }
+      }
+      // The theme as it is NOW - it may have been changed while a key was
+      // being checked.
+      payload.theme = state.themePref;
+      try {
+        const cfg = await window.pywebview.api.save_settings(payload);
+        state.config = cfg;
+        if (cfg.key_storage === 'file') warn = 'Saved — but Windows Credential Manager isn\'t available, so your key is in Scribe\'s settings file.';
+        if (cfg.warnings && cfg.warnings.length) warn = 'Saved — but ' + butClause(cfg.warnings.join(' '));
+        renderSettings(); renderHome(); refreshElevenUsage();
+        showSaveStatus(warn || 'Saved. Changes apply right away.', warn ? 'warn' : '');
+      } catch (e) {
+        // A failed save is never shown as "Saved" - say what went wrong.
+        console.error(e);
+        showSaveStatus(`Couldn't save — ${(e && e.message) || 'please try again.'}`, 'error');
+      }
+    });
+
+    // Live model status under "Speech model", fed by pollStatus while
+    // Settings is open.
+    function renderModelStatus(st) {
+      const m = (st && st.model) || {};
+      const el = $('#set-model-status');
+      // Only when something changed: rebuilding it on every poll (800 ms)
+      // would swallow a click on Retry and throw keyboard focus off it.
+      const sig = JSON.stringify([!!(st && st.running), m.state, m.name, m.failed_stage, m.error,
+                                  m.state === 'downloading' ? modelPercent(m) : 0]);
+      if (sig === el.dataset.sig) return;
+      el.dataset.sig = sig;
+      el.className = 'help'; el.textContent = '';
+      if (!st || !st.running) { el.textContent = 'Scribe isn\'t running'; el.classList.add('warn'); return; }
+      if (m.state === 'ready') { el.textContent = `${m.name} · ready`; el.classList.add('ok'); }
+      else if (m.state === 'downloading') { el.textContent = `Downloading ${m.name} — ${modelPercent(m)}%`; el.classList.add('warn'); }
+      else if (m.state === 'loading') { el.textContent = `Loading ${m.name}…`; }
+      else if (m.state === 'off') { el.textContent = 'Not used — cloud only'; }
+      else if (m.state === 'waiting') { el.textContent = 'Waiting for setup'; }
+      else if (m.state === 'failed') {
+        el.textContent = `${m.failed_stage === 'load' ? 'Couldn\'t load' : 'Couldn\'t download'} — ${m.error}`; el.classList.add('error');
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'inline-retry'; b.textContent = 'Retry';
+        b.addEventListener('click', (e) => { e.preventDefault(); window.pywebview.api.retry_model(); });
+        el.appendChild(b);
+      }
+    }
+
+    // --- About: this version, and updates --------------------------------
+    // Checked when Settings first opens (unless automatic checks are off),
+    // or with "Check for updates". "Update now" hands over to the updater:
+    // it closes Scribe and this window, and opens Scribe again when done.
+    const about = { checked: false, busy: false };
+    function renderAbout(r) {
+      const status = $('#about-status');
+      $('#about-install').hidden = true; $('#about-notes').hidden = true;
+      status.className = 'help';
+      if (r.status === 'available') {
+        status.textContent = `Version ${r.latest} is available — updating takes about a minute.`;
+        status.classList.add('ok'); $('#about-install').hidden = false; $('#about-notes').hidden = false;
+      } else if (r.status === 'current') {
+        status.textContent = 'You have the latest version.';
+      } else {
+        status.textContent = r.message || 'Couldn’t check for updates.'; status.classList.add('warn');
+      }
+    }
+    async function checkUpdates() {
+      if (about.busy) return;
+      about.busy = true; about.checked = true; $('#about-check').disabled = true;
+      $('#about-status').className = 'help'; $('#about-status').textContent = 'Checking…';
+      try { renderAbout(await window.pywebview.api.check_for_updates()); }
+      catch (e) { renderAbout({ status: 'error' }); }
+      finally { about.busy = false; $('#about-check').disabled = false; }
+    }
+    $('#about-check').addEventListener('click', checkUpdates);
+    $('#about-notes').addEventListener('click', () => window.pywebview.api.open_release_page());
+    $('#about-install').addEventListener('click', async () => {
+      $('#about-install').disabled = true; $('#about-check').disabled = true;
+      $('#about-status').className = 'help';
+      $('#about-status').textContent = 'Updating — Scribe closes now and opens again in about a minute.';
+      try { await window.pywebview.api.install_update(); }
+      catch (e) {
+        $('#about-status').textContent = `Couldn’t start the update — ${(e && e.message) || 'run update.bat in Scribe’s folder.'}`;
+        $('#about-status').classList.add('error');
+        $('#about-install').disabled = false; $('#about-check').disabled = false;
+      }
+    });
+
+    // Manual "add a word" box on the Dictionary page.
+    $('#dict-add-term-btn').addEventListener('click', () => {
+      const inp = $('#dict-add-term'); const v = inp.value.trim();
+      if (v) { addTerm(v); inp.value = ''; }
+    });
+    $('#dict-add-term').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); $('#dict-add-term-btn').click(); }
+    });
+
+    function copyToClipboard(text) {
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(() => showToast('Copied to clipboard')).catch(() => {});
+    }
+
+    // ===== WELCOME (first run) ================================
+    // Five short steps: how to listen -> accuracy or a key -> mic,
+    // hotkey, sign-in -> getting ready (live progress from the running
+    // Scribe) -> a first dictation. "Finish setup" is the commit point:
+    // before it nothing is saved; after it, closing the window is fine.
+    const wz = { mode: 'groq', model: 'small.en', keyStatus: null, keyForced: false, keyFor: null,
+                 pollTimer: null, pollBusy: false, autoAdvanced: false, tried: false, warnings: [] };
+
+    function fillSelect(sel, options, selected) {
+      const el = $(sel); el.innerHTML = '';
+      for (const opt of options) {
+        const o = document.createElement('option'); o.value = opt; o.textContent = opt;
+        if (opt === selected) o.selected = true;
+        el.appendChild(o);
+      }
+    }
+    function formatBytes(n) { return n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${Math.round(n / 1e6)} MB`; }
+    function modelPercent(m) { return m && m.total ? Math.min(100, Math.floor(m.done * 100 / m.total)) : 0; }
+    function wzNote(sel, text, tone = '') { const el = $(sel); el.textContent = text; el.className = 'wz-note' + (tone ? ` ${tone}` : ''); }
+
+    function wzShow(step) {
+      $$('.wz-step').forEach(s => { s.hidden = s.dataset.step !== step; });
+      const order = ['mode', 'choose', 'setup', 'ready', 'try'];
+      const at = order.indexOf(step === 'local' || step === 'cloud' ? 'choose' : step);
+      $$('.wz-dot').forEach((d, i) => d.classList.toggle('on', i <= at));
+      if (step === 'ready') wzStartPolling(); else wzStopPolling();
+      if (step === 'cloud') { wzFillProvider(); setTimeout(() => $('#wz-key').focus(), 60); }
+      if (step === 'try') { $('#wz-try-hotkey').textContent = state.config.hotkey || 'Ctrl + Win'; setTimeout(() => $('#wz-try-box').focus(), 60); }
+    }
+
+    function startWelcome() {
+      $('.app').hidden = true; $('#welcome').hidden = false;
+      fillSelect('#wz-mic', state.choices.mics, '(system default)');
+      fillSelect('#wz-hotkey', state.choices.hotkeys, state.config.hotkey || 'Ctrl + Win');
+      $('#wz-login').closest('.wz-check').hidden = state.config.start_at_login === null;
+      wzShow('mode');
+    }
+
+    // Step 1: how should Scribe listen?
+    $$('#wz-modes .wz-choice').forEach(b => b.addEventListener('click', () => {
+      wz.mode = b.dataset.mode;
+      $$('#wz-modes .wz-choice').forEach(x => x.classList.toggle('selected', x === b));
+      $('#wz-mode-next').disabled = false;
+    }));
+    $('#wz-mode-next').addEventListener('click', () => wzShow(wz.mode === 'local' ? 'local' : 'cloud'));
+
+    // The key step, for whichever cloud service was chosen above.
+    // Each service's key in three plain steps: open its key page, create a
+    // key, paste it here (it's checked the moment it's pasted).
+    const WZ_PROVIDERS = {
+      groq: { name: 'Groq', placeholder: 'gsk_…', prefix: 'gsk_',
+              lead: 'Scribe sends your voice to Groq, which turns it into text. Groq’s free tier covers everyday dictation, and the same key powers AI polish.',
+              link: 'Open Groq’s API keys page', step1: ' and sign in — a Google account works.',
+              step2: 'Click “Create API Key”, give it any name, and copy the key.', tip: '',
+              check: (k) => window.pywebview.api.check_groq_key(k),
+              open: () => window.pywebview.api.open_groq_keys_page() },
+      elevenlabs: { name: 'ElevenLabs', placeholder: 'sk_…', prefix: 'sk_',
+              lead: 'Scribe streams your voice to ElevenLabs while you speak, so your text is ready the moment you let go. It needs a paid ElevenLabs plan — Starter is enough.',
+              link: 'Open ElevenLabs’ API keys page', step1: ' and sign in.',
+              step2: 'Click “Create API key”, allow “Speech to Text”, and copy the key.',
+              tip: ' Add a free Groq key later in Settings for AI polish and a backup.',
+              check: (k) => window.pywebview.api.check_elevenlabs_key(k),
+              open: () => window.pywebview.api.open_elevenlabs_keys_page() },
+    };
+    function wzProvider() { return WZ_PROVIDERS[wz.mode] || WZ_PROVIDERS.groq; }
+    function wzFillProvider() {
+      const p = wzProvider();
+      $('#wz-cloud-lead').textContent = p.lead;
+      $('#wz-get-key').textContent = p.link; $('#wz-step-1').textContent = p.step1;
+      $('#wz-step-2').textContent = p.step2; $('#wz-cloud-tip').textContent = p.tip;
+      // A portable copy (its own data folder) keeps keys in its settings file.
+      if (state.config.start_at_login === null) $('#wz-key-where').textContent = 'Your key stays on this PC, in this copy\'s settings file.';
+      $('#wz-key').placeholder = p.placeholder;
+      $('#wz-backup-help').textContent = `If the internet or ${p.name} is down, Scribe keeps working on your PC.`;
+      if (wz.keyFor !== wz.mode) {          // another service: its key starts fresh
+        wz.keyFor = wz.mode; $('#wz-key').value = ''; wz.keyStatus = null; wz.keyForced = false;
+        $('#wz-key-anyway').hidden = true; wzNote('#wz-key-note', ''); wzKeyReady();
+      }
+    }
+
+    // Step 2a: accuracy (on this PC).
+    $$('#wz-models .wz-choice').forEach(b => b.addEventListener('click', () => {
+      wz.model = b.dataset.model;
+      $$('#wz-models .wz-choice').forEach(x => x.classList.toggle('selected', x === b));
+    }));
+    $('#wz-local-back').addEventListener('click', () => wzShow('mode'));
+    $('#wz-local-next').addEventListener('click', () => wzShow('setup'));
+
+    // Step 2b: the key (cloud). Continue needs a key that works - or,
+    // when the service can't be reached right now, an explicit "Use it anyway".
+    function wzKeyReady() { $('#wz-cloud-next').disabled = !(wz.keyStatus === 'ok' || wz.keyForced); }
+    $('#wz-key').addEventListener('input', () => {
+      wz.keyStatus = null; wz.keyForced = false; $('#wz-key-anyway').hidden = true;
+      wzNote('#wz-key-note', ''); wzKeyReady();
+    });
+    $('#wz-key').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#wz-key-check').click(); } });
+    // Paste: the window has no right-click menu, and Ctrl + V isn't obvious
+    // to everyone. Only key-like text comes back from the clipboard.
+    // Something that starts like this service's keys is checked at once;
+    // anything else (a password copied earlier?) is never sent anywhere
+    // until the user presses Check key.
+    function wzCheckIfKey() {
+      const key = $('#wz-key').value.trim(), p = wzProvider();
+      if (!key || $('#wz-key-check').disabled) return;
+      if (key.startsWith(p.prefix)) { $('#wz-key-check').click(); return; }
+      wzNote('#wz-key-note', `That doesn't look like a ${p.name} key — they start with ${p.prefix}. Check what you copied, then press Check key.`, 'warn');
+    }
+    $('#wz-key-paste').addEventListener('click', async () => {
+      let key = '';
+      try { key = await window.pywebview.api.read_clipboard_key(); } catch (e) { key = ''; }
+      if (!key) { wzNote('#wz-key-note', 'Copy your key first (on the key page), then click Paste.', 'error'); return; }
+      $('#wz-key').value = key; wz.keyStatus = null; wz.keyForced = false; wzKeyReady();
+      wzCheckIfKey();
+    });
+    // A pasted key is checked at once - no button to find. (The paste lands
+    // in the box after this event, hence the zero-delay timeout.)
+    $('#wz-key').addEventListener('paste', () => setTimeout(wzCheckIfKey, 0));
+    $('#wz-get-key').addEventListener('click', () => whenReady(() => wzProvider().open()));
+    $('#wz-key-check').addEventListener('click', async () => {
+      const key = $('#wz-key').value.trim();
+      if (!key) { wzNote('#wz-key-note', 'Paste your key first.', 'error'); return; }
+      const btn = $('#wz-key-check'); btn.disabled = true;
+      wzNote('#wz-key-note', `Checking with ${wzProvider().name}…`);
+      try {
+        const r = await wzProvider().check(key);
+        wz.keyStatus = r.status;
+        wzNote('#wz-key-note', r.message, r.status === 'ok' ? 'ok' : r.status === 'offline' ? 'warn' : 'error');
+        $('#wz-key-anyway').hidden = r.status !== 'offline';
+      } catch (e) {
+        wzNote('#wz-key-note', 'Couldn\'t check the key — please try again.', 'error');
+      } finally { btn.disabled = false; wzKeyReady(); }
+    });
+    $('#wz-key-anyway').addEventListener('click', () => {
+      wz.keyForced = true; $('#wz-key-anyway').hidden = true;
+      wzNote('#wz-key-note', `Scribe will use this key. If ${wzProvider().name} rejects it later, you'll get a notice.`, 'warn');
+      wzKeyReady();
+    });
+    $('#wz-cloud-back').addEventListener('click', () => wzShow('mode'));
+    $('#wz-cloud-next').addEventListener('click', () => wzShow('setup'));
+
+    // Step 3: mic, hotkey, sign-in - then Finish setup (the commit point).
+    $('#wz-setup-back').addEventListener('click', () => wzShow(wz.mode === 'local' ? 'local' : 'cloud'));
+    $('#wz-finish').addEventListener('click', async () => {
+      const btn = $('#wz-finish'); btn.disabled = true;
+      wzNote('#wz-setup-note', 'Saving…');
+      const cloud = wz.mode !== 'local';
+      try {
+        const r = await window.pywebview.api.finish_setup({
+          use_cloud: cloud,
+          cloud_provider: cloud ? wz.mode : 'groq',
+          groq_api_key: wz.mode === 'groq' ? $('#wz-key').value.trim() : '',
+          elevenlabs_api_key: wz.mode === 'elevenlabs' ? $('#wz-key').value.trim() : '',
+          local_model: cloud ? toggleValue('wz-backup') : true,
+          model_size: cloud ? 'small.en' : wz.model,
+          mic_device: $('#wz-mic').value, hotkey: $('#wz-hotkey').value,
+          start_at_login: toggleValue('wz-login'),
+        });
+        state.config = r.config || state.config;
+        wz.warnings = r.warnings || [];
+        wzNote('#wz-setup-note', '');
+        wzShow('ready');
+      } catch (e) {
+        wzNote('#wz-setup-note', `Couldn't save — ${(e && e.message) || 'please try again.'}`, 'error');
+      } finally { btn.disabled = false; }
+    });
+
+    // Step 4: getting ready - live status from the running Scribe.
+    function wzStartPolling() { wzStopPolling(); wzPoll(); wz.pollTimer = setInterval(wzPoll, 500); }
+    function wzStopPolling() { if (wz.pollTimer) { clearInterval(wz.pollTimer); wz.pollTimer = null; } }
+    async function wzPoll() {
+      if (wz.pollBusy) return; wz.pollBusy = true;
+      try { wzRenderReady(await window.pywebview.api.get_setup_status()); }
+      catch (e) { console.error('get_setup_status failed:', e); }
+      finally { wz.pollBusy = false; }
+    }
+    function wzRenderReady(st) {
+      const bar = $('#wz-bar'), count = $('#wz-bar-count'), next = $('#wz-ready-next');
+      const warn = wz.warnings.join(' ');
+      $('#wz-retry').hidden = true; bar.classList.remove('pulse', 'danger');
+      if (!st || !st.running) {
+        $('#wz-ready-title').textContent = 'Waiting for Scribe';
+        $('#wz-progress').hidden = true; next.disabled = true;
+        wzNote('#wz-ready-note', 'Scribe isn\'t running. Start it from the Start menu — your setup is saved.', 'warn');
+        return;
+      }
+      if (st.setup_complete === false) {
+        // Scribe hasn't taken the new setup yet (a lost message is re-sent).
+        $('#wz-ready-title').textContent = 'Finishing setup…';
+        $('#wz-progress').hidden = true; next.disabled = true;
+        wzNote('#wz-ready-note', '');
+        return;
+      }
+      const m = st.model || {}; const pct = modelPercent(m);
+      if (wz.mode !== 'local') {
+        $('#wz-ready-title').textContent = 'Cloud transcription is ready';
+        $('#wz-bar-label').textContent = 'Offline backup';
+        const busy = m.state === 'downloading' || m.state === 'loading';
+        $('#wz-progress').hidden = !busy;
+        bar.style.width = `${m.state === 'loading' ? 100 : pct}%`;
+        count.textContent = m.state === 'downloading' ? `${pct}%` : '';
+        if (busy) wzNote('#wz-ready-note', 'The offline backup is downloading in the background — you don\'t need to wait.');
+        else if (m.state === 'failed') wzNote('#wz-ready-note', `The offline backup couldn't download: ${m.error} You can retry it in Settings.`, 'warn');
+        else wzNote('#wz-ready-note', warn, warn ? 'warn' : '');
+        next.disabled = false;
+        return;
+      }
+      $('#wz-progress').hidden = false; $('#wz-bar-label').textContent = 'Speech model';
+      if (m.state === 'downloading') {
+        $('#wz-ready-title').textContent = 'Downloading the speech model';
+        count.textContent = m.total ? `${formatBytes(m.done)} of ${formatBytes(m.total)}` : 'Starting…';
+        bar.style.width = `${pct}%`; next.disabled = true;
+        wzNote('#wz-ready-note', 'This happens once. You can keep using your PC meanwhile.');
+      } else if (m.state === 'loading' || m.state === 'waiting') {
+        $('#wz-ready-title').textContent = 'Loading the speech model';
+        count.textContent = ''; bar.style.width = '100%'; bar.classList.add('pulse'); next.disabled = true;
+        wzNote('#wz-ready-note', 'Almost there…');
+      } else if (m.state === 'ready') {
+        $('#wz-ready-title').textContent = 'Scribe is ready';
+        count.textContent = 'Done'; bar.style.width = '100%'; next.disabled = false;
+        wzNote('#wz-ready-note', warn || 'Everything is set up.', warn ? 'warn' : 'ok');
+        if (!wz.autoAdvanced && !warn) {
+          wz.autoAdvanced = true;
+          setTimeout(() => { if (!$('#wz-step-ready').hidden) wzShow('try'); }, 900);
+        }
+      } else if (m.state === 'failed') {
+        $('#wz-ready-title').textContent = m.failed_stage === 'load' ? 'The speech model couldn\'t be loaded' : 'The download didn\'t finish';
+        count.textContent = ''; next.disabled = true; $('#wz-retry').hidden = false;
+        bar.classList.add('danger');           // the stalled bar turns red
+        wzNote('#wz-ready-note', m.error || 'Something went wrong.', 'error');
+      }
+    }
+    $('#wz-retry').addEventListener('click', async () => {
+      $('#wz-retry').hidden = true; wzNote('#wz-ready-note', 'Trying again…');
+      try { await window.pywebview.api.retry_model(); } catch (e) { console.error(e); }
+    });
+    $('#wz-ready-next').addEventListener('click', () => wzShow('try'));
+
+    // Step 5: a first dictation lands in the box through the normal pipeline.
+    $('#wz-try-box').addEventListener('input', () => {
+      if (wz.tried || !$('#wz-try-box').value.trim()) return;
+      wz.tried = true;
+      wzNote('#wz-try-note', 'That\'s it. Scribe lives in your tray — double-click its icon any time to open this dashboard.', 'ok');
+    });
+    $('#wz-open').addEventListener('click', () => {
+      wzStopPolling(); $('#welcome').hidden = true; $('.app').hidden = false;
+      boot({ skipWelcome: true });
+    });
+    $('#wz-close').addEventListener('click', () => whenReady(() => window.pywebview.api.close_window()));
+
+    // ===== Boot ===============================================
+    async function boot(opts = {}) {
+      try {
+        const data = await window.pywebview.api.get_initial_data();
+        state.entries = data.entries || []; state.config = data.config || {};
+        state.vocab = data.vocab || { terms: [], corrections: [] };
+        state.choices = data.choices || { hotkeys: [], models: [], mics: [] };
+        state.appIcons = data.app_icons || {}; state.cloud = data.cloud || null; state.logSig = data.log_sig || null;
+        state.historyGen = data.history_gen;
+        state.suggestions = data.suggestions || [];
+        state.appVersion = data.app_version || '';
+        applyTheme(state.config.theme);
+        // First run: the welcome takes the whole window until it's done.
+        if (data.welcome && !opts.skipWelcome) { startWelcome(); return; }
+        renderHome(); renderInsights(); renderDictionary(); renderSettings(); renderCloudUsage();
+        startLogPolling(); pollStatus(true);
+        refreshElevenUsage();
+        if (!state.elevenTimer) state.elevenTimer = setInterval(refreshElevenUsage, 5 * 60 * 1000);
+        // Anything Scribe recovered for you (a damaged settings file, say),
+        // shown once, gently, after the page has settled.
+        (data.notices || []).forEach((n, i) =>
+          setTimeout(() => showToast(`${n.title} — ${n.message}`, 6500, 'warn'), 700 + i * 7200));
+      } catch (e) { console.error('Boot failed:', e); }
+    }
+
+    // New dictations: every second while the window is visible (a single
+    // stat() when nothing changed), every 5 s while it's hidden.
+    const POLL_INTERVAL_MS = 1000; let historyPoll = null, pollTick = 0, pollTimer = null;
+    function startLogPolling() {
+      if (pollTimer) return;
+      pollTimer = setInterval(() => {
+        pollTick++;
+        if (pageHidden() && pollTick % 5) return;
+        pollHistory();
+      }, POLL_INTERVAL_MS);
+    }
+
+    // One history poll at a time: asking while one runs gets that one.
+    function pollHistory() {
+      if (historyPoll) return historyPoll;
+      if (!window.pywebview || !window.pywebview.api || !window.pywebview.api.poll_updates) return Promise.resolve();
+      historyPoll = fetchHistory().finally(() => { historyPoll = null; });
+      return historyPoll;
+    }
+
+    async function fetchHistory() {
+      try {
+        // Tell Python what we have (history generation + how many entries)
+        // so it sends exactly what's missing.
+        const update = await window.pywebview.api.poll_updates(state.logSig, state.historyGen, state.entries.length);
+        if (update && update.log_sig) state.logSig = update.log_sig;
+        if (update && update.changed) {
+          // Usually just the new dictations; everything only if the
+          // history file was rewritten (an undo, a hand edit).
+          let entriesChanged = false;
+          if (update.reset) { state.entries = update.entries || []; entriesChanged = true; }
+          else if (update.appended && update.appended.length) { state.entries = state.entries.concat(update.appended); entriesChanged = true; }
+          if (update.history_gen !== undefined) state.historyGen = update.history_gen;
+          state.appIcons = Object.assign({}, state.appIcons, update.app_icons || {});
+          if (update.cloud !== undefined) state.cloud = update.cloud;
+          // Home only when dictations changed (a cloud-usage tick mustn't
+          // rebuild History under a keyboard user's focus).
+          if (entriesChanged) { renderHome(); if (!$('#page-insights').hidden) renderInsights(); }
+          renderCloudUsage();
+          if (update.suggestions) applySuggestions(update.suggestions);
+        }
+      } catch (e) { console.error('poll_updates failed:', e); }
+    }
+
+    // ===== Window controls + drag (frameless) =================
+    function whenReady(fn) { if (window.pywebview && window.pywebview.api) fn(); else window.addEventListener('pywebviewready', fn, { once: true }); }
+    $('#tb-min').addEventListener('click', () => whenReady(() => window.pywebview.api.minimize_window()));
+    $('#tb-max').addEventListener('click', () => whenReady(() => window.pywebview.api.toggle_maximize()));
+    $('#tb-close').addEventListener('click', () => whenReady(() => window.pywebview.api.close_window()));
+
+    const dragRegion = document.querySelector('.titlebar-drag'); let dragState = null, dragButtonDown = false;
+    dragRegion.addEventListener('mousedown', async (e) => {
+      if (e.button !== 0) return; if (!window.pywebview || !window.pywebview.api) return;
+      dragButtonDown = true;
+      const pos = await window.pywebview.api.get_window_position();
+      // A quick click can be over before the position arrives - don't start
+      // a drag that nothing will ever end.
+      if (!pos || !dragButtonDown) return;
+      dragState = { startCursorX: e.screenX, startCursorY: e.screenY, startWinX: pos[0], startWinY: pos[1], pendingX: pos[0], pendingY: pos[1], rafScheduled: false };
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!dragState) return;
+      if (e.buttons === 0) { endDrag(); return; }   // the button came up where we couldn't see it
+      dragState.pendingX = dragState.startWinX + (e.screenX - dragState.startCursorX);
+      dragState.pendingY = dragState.startWinY + (e.screenY - dragState.startCursorY);
+      if (!dragState.rafScheduled) { dragState.rafScheduled = true;
+        requestAnimationFrame(() => { if (!dragState) return; window.pywebview.api.move_window(dragState.pendingX, dragState.pendingY); dragState.rafScheduled = false; }); }
+    });
+    function endDrag() { dragState = null; dragButtonDown = false; }
+    document.addEventListener('mouseup', endDrag); window.addEventListener('blur', endDrag);
+    dragRegion.addEventListener('dblclick', () => whenReady(() => window.pywebview.api.toggle_maximize()));
+
+    if (window.pywebview && window.pywebview.api) boot();
+    else window.addEventListener('pywebviewready', () => boot());
+  </script>
+</body>
+</html>

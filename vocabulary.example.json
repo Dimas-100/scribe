@@ -1,0 +1,15 @@
+{
+  "terms": [
+    "Scribe",
+    "GitHub",
+    "JavaScript",
+    "TypeScript",
+    "VS Code"
+  ],
+  "corrections": {
+    "git hub": "GitHub",
+    "java script": "JavaScript",
+    "type script": "TypeScript",
+    "vs code": "VS Code"
+  }
+}

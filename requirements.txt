@@ -1,0 +1,21 @@
+# Scribe's dependencies. Install into a virtual environment:
+#     py -3.11 -m venv venv
+#     venv\Scripts\pip install -r requirements.txt
+#
+# Each package is pinned with "~=" (compatible release) to the version Scribe
+# is tested with: bug-fix updates install automatically, but a new minor or
+# major version - which can change behavior - does not. Bump these on purpose,
+# after re-running the tests, rather than letting pip drift.
+
+sounddevice~=0.5.5       # microphone capture
+numpy~=2.4.5             # audio arrays
+pynput~=1.8.2            # global hotkey + typing the text
+faster-whisper~=1.2.1    # local Whisper model (and its Silero voice detector)
+pystray~=0.19.5          # system-tray icon
+pillow~=12.2.0           # tray icon + overlay drawing
+pyperclip~=1.11.0        # clipboard paste
+groq~=1.2.0              # optional cloud transcription
+httpx~=0.28.1            # Groq request timeouts (also a groq dependency)
+websockets~=17.1         # optional ElevenLabs streaming (cloud)
+pywebview~=6.2.1         # the dashboard window
+pywin32>=311             # only used by install_shortcut.py (Start-menu shortcut)

@@ -1,0 +1,53 @@
+# Virtual environment — recreate with: python -m venv venv && pip install -r requirements.txt
+venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# OS / editor cruft
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Claude Code per-user local settings (machine-specific, not shared)
+.claude/settings.local.json
+
+# Per-machine / personal runtime data — generated at runtime, not committed.
+# config.json is written by the setup wizard / dashboard on each install;
+# dictation_log.jsonl is your personal speech history.
+config.json
+dictation_log.jsonl
+# error_log.txt is this machine's crash trail; cloud_usage.jsonl is your
+# personal Groq usage history; app_icons/ is an on-demand cache of icons
+# pulled from whatever apps you dictate into. All regenerated at runtime.
+error_log.txt
+cloud_usage.jsonl
+app_icons/
+
+# Your personal vocabulary (names, jargon, and the words the dashboard learned
+# from your dictations). Start from vocabulary.example.json instead.
+vocabulary.json
+
+# Windows shortcuts embed absolute paths (and your PC name), so they only ever
+# work on the machine that made them. install_shortcut.py builds a correct one.
+*.lnk
+
+# Isolated git worktrees for in-progress work (see superpowers:using-git-worktrees).
+.worktrees/
+
+# setup.bat's private Python and its installer, downloaded only when this PC
+# has no Python 3.11-3.13 (see setup.bat).
+.tools/
+
+# Design notes, plans and reviews from building Scribe. They're kept on the
+# developer's PC only: they're full of personal context (real dictations,
+# machines, accounts) that doesn't belong in a public repo.
+docs/superpowers/
+docs/reviews/
+.superpowers/
+
+# Browser-automation scratch files (screenshots are copied to docs/images/).
+.playwright-mcp/
+
+.venv/
