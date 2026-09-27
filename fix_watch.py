@@ -14,9 +14,12 @@
    3. when the watch ends, compares what Scribe typed with what you left
       (learning.find_fixes) and hands each fix to on_fix(wrong, right).
 
- The watch ends early when you dictate again (after one last read), when the
- box is cleared or gone (a chat message was sent - the last good read still
- counts), or when Scribe's text can no longer be found.
+ The watch ends early when Scribe is about to type again - a new dictation,
+ "scratch that", "fix that" call interrupt() first, and only the reads made
+ BEFORE it count (a later one could hold Scribe's own words, not your fix) -
+ when the box is cleared or gone (a chat message was sent - the last good
+ read still counts), when Scribe's text can no longer be found, or when
+ learning is switched off (then nothing is learned).
 
  Rules that keep this safe:
    - Everything happens on THIS thread: UI Automation (COM) objects must stay
@@ -24,7 +27,8 @@
    - watch() is only a queue put, safe from any thread; nothing here touches
      Tk or the keyboard hook.
    - Nothing raises into Scribe: a failed read ends that watch, a failed
-     learn is reported, and both go to on_error(where, exc).
+     learn is reported, and both go to on_error(where, exc) - as does any
+     other failure inside a watch ("watch"), which never ends the thread.
    - What is read stays in memory, only for the watch. Only the fixes leave.
 =============================================================================
 """
@@ -48,8 +52,8 @@ class FixWatcher:
     the thread (COM objects belong to the thread that made them) and must
     return a Reader: focused_box(hwnd) -> box or None, read(box) -> text or
     None. `on_fix(wrong, right)` learns a fix; `on_error(where, exc)` hears
-    about failures ("start", "read", "learn"). The times are parameters so
-    the tests can run a watch in a fraction of a second.
+    about failures ("start", "read", "learn", "watch"). The times are
+    parameters so the tests can run a watch in a fraction of a second.
     """
 
     def __init__(self, make_reader, on_fix, on_error=None, poll=POLL_SECONDS,
@@ -58,9 +62,16 @@ class FixWatcher:
         self.on_fix = on_fix
         self.on_error = on_error or (lambda where, exc: None)
         self.poll, self.watch_seconds, self.settle = poll, watch, settle
-        self.enabled = True        # off (the setting, or no UI Automation): watch() does nothing
+        # Off (the setting, or no UI Automation): watch() does nothing, and
+        # a watch already running stops at its next look, learning nothing.
+        self.enabled = True
         self.thread = None
         self._jobs = queue.Queue()
+        self._pending = None       # a job that arrived during a watch: the next one
+        # interrupt() counts up: a watch belongs to the count it was asked
+        # for under, and ends once Scribe types again.
+        self._typed_count = 0
+        self._count_lock = threading.Lock()
 
     # --- Called from other threads ----------------------------------------
 
@@ -72,10 +83,18 @@ class FixWatcher:
     def watch(self, hwnd, typed):
         """Scribe just typed `typed` into window `hwnd`: watch it. A queue put."""
         if self.enabled and isinstance(typed, str) and typed.strip():
-            self._jobs.put((hwnd, typed.strip()))
+            self._jobs.put((hwnd, typed.strip(), self._typed_count))
+
+    def interrupt(self):
+        """Scribe is about to type into a window (a dictation, "scratch
+        that", "fix that"): the current watch ends on the reads it already
+        has - any read finishing after this may hold Scribe's own text. Call
+        it BEFORE typing. Never blocks."""
+        with self._count_lock:
+            self._typed_count += 1
 
     def stop(self):
-        """End the thread (the current watch finishes with one last read)."""
+        """End the thread (the current watch ends on its last read)."""
         self._jobs.put(_STOP)
 
     def wait_idle(self, timeout):
@@ -97,16 +116,16 @@ class FixWatcher:
             self.on_error("start", exc)
             self._drain()
             return
-        item = None
         while True:
-            if item is None:
-                item = self._jobs.get()
+            item, self._pending = self._pending or self._jobs.get(), None
             if item is _STOP:
                 self._jobs.task_done()
                 return
-            following = self._watch_one(reader, *item)
+            try:
+                self._watch_one(reader, *item)
+            except Exception as exc:      # a bug ends this watch - never the watcher
+                self.on_error("watch", exc)
             self._jobs.task_done()
-            item = following
 
     def _drain(self):
         """Mark anything already queued as done (there's nothing to watch with)."""
@@ -118,56 +137,64 @@ class FixWatcher:
             self._jobs.task_done()
 
     def _wait(self, seconds):
-        """Wait up to `seconds` - but a new job ends the wait at once. Returns
-        that job (already taken from the queue), or None."""
+        """Wait up to `seconds` - but a new job ends the wait at once (it is
+        kept in _pending, the next to handle). True if one came."""
         if seconds <= 0:
-            return None
+            return False
         try:
-            return self._jobs.get(timeout=seconds)
+            self._pending = self._jobs.get(timeout=seconds)
+            return True
         except queue.Empty:
-            return None
+            return False
 
-    def _watch_one(self, reader, hwnd, typed):
-        """Watch one dictation. Returns a job that arrived meanwhile (the
-        next to handle), or None."""
-        following = self._wait(self.settle)
-        if following is not None:
-            return following                  # dictated again before it even landed
+    def _still_on(self, count):
+        """May this watch go on? Not once learning is switched off, and not
+        once Scribe typed again (interrupt() since it was asked for)."""
+        return self.enabled and self._typed_count == count
+
+    def _watch_one(self, reader, hwnd, typed, count):
+        """Watch one dictation, asked for when interrupt() stood at `count`."""
+        if self._wait(self.settle) or not self._still_on(count):
+            return                            # dictated again before it even landed
         try:
             box = reader.focused_box(hwnd)
             text = reader.read(box) if box is not None else None
         except Exception as exc:
             self.on_error("read", exc)
-            return None
-        if not text:
-            return None                       # a password box, an app we can't read
+            return
+        if not text or not self._still_on(count):
+            return                            # a password box, an app we can't read
         at = text.rfind(typed)
         if at < 0:
-            return None                       # not where we can see it: leave it
+            return                            # not where we can see it: leave it
         end = at + len(typed)
         before = text[max(0, at - learning.ANCHOR_CHARS):at]
         after = text[end:end + learning.ANCHOR_CHARS]
         last = typed
         deadline = time.monotonic() + self.watch_seconds
-        while following is None:
+        while True:
             left = deadline - time.monotonic()
             if left <= 0:
                 break
-            following = self._wait(min(self.poll, left))
+            if self._wait(min(self.poll, left)) or not self._still_on(count):
+                break                         # Scribe types again: the reads so far count
             try:
-                text = reader.read(box)       # one last read even when a new job came
+                text = reader.read(box)
             except Exception as exc:
                 self.on_error("read", exc)
                 break
+            if not self._still_on(count):
+                break                         # this read may hold Scribe's own typing
             if not text or not text.strip():
                 break                         # sent or cleared: the last good read counts
             region = learning.find_region(before, after, text)
             if region is None:
                 break                         # rewritten around it: stop following
             last = region
+        if not self.enabled:
+            return                            # switched off meanwhile: learn nothing
         for wrong, right in learning.find_fixes(typed, last):
             try:
                 self.on_fix(wrong, right)
             except Exception as exc:
                 self.on_error("learn", exc)
-        return following

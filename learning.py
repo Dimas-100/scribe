@@ -8,7 +8,9 @@
    1. FROM YOUR FIXES. After Scribe types a dictation, fix_watch.py keeps an
       eye on that text box for a minute. find_fixes() compares what Scribe
       typed with what you left there and returns the words you corrected
-      ("cal she" -> "Kalshi"): next time Scribe spells them right.
+      ("cal she" -> "Kalshi"): the voice model listens for them from then
+      on, and a mishearing that isn't a real word ("Koushi") is also
+      swapped for your spelling (replaceable).
 
    2. FROM WHAT YOU SAY OFTEN. SuggestionIndex counts the words across your
       history; auto_terms() picks the names and jargon worth keeping
@@ -278,6 +280,17 @@ ANCHOR_CHARS = 40        # the text around Scribe's text, to find it again
 _FIX_WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)*")
 # What joins two words into one written unit: "text-to-speech", "and/or".
 _JOINERS = "-/"
+# Word, Outlook and phones turn a typed ' into ’ ("you’re"): the same letter
+# for us. Swapped one for one, so every position in the text stays put.
+_APOSTROPHES = str.maketrans({"’": "'", "‘": "'"})
+# Endings that make another form of the same word - "API" -> "APIs",
+# "Webull" -> "Webull's", "deploy" -> "deployed". Changing one is an edit,
+# not a mishearing: learning it would add the ending to every later "API".
+_ENDINGS = ("'s", "s'", "'", "s", "es", "d", "ed", "ing")
+
+
+def _plain(text):
+    return (text or "").translate(_APOSTROPHES)
 
 
 def _word_spans(text):
@@ -286,8 +299,43 @@ def _word_spans(text):
 
 
 def _everyday(words):
-    return all(w.lower() in COMMON_WORDS or w.lower().replace("'", "") in COMMON_WORDS
-               for w in words)
+    """Are all of `words` everyday English ("their", "you’re", "set")?"""
+    for w in words:
+        w = _plain(w).lower()
+        if w not in COMMON_WORDS and w.replace("'", "") not in COMMON_WORDS:
+            return False
+    return True
+
+
+def _other_form(a, b):
+    """Is one of `a`, `b` the other plus an ending ("repo" / "repos", "make" /
+    "making")?"""
+    a, b = _plain(a).lower(), _plain(b).lower()
+    for short, long_ in ((a, b), (b, a)):
+        if long_.startswith(short) and long_[len(short):] in _ENDINGS:
+            return True
+        if short.endswith("e") and long_ == short[:-1] + "ing":
+            return True
+    return False
+
+
+def _starts_sentence(text, start):
+    """Does the word at `start` begin a sentence or a line? Its capital then
+    says nothing about the word itself."""
+    before = text[:start].rstrip(" \t")
+    return not before or before[-1] in ".!?\n\r"
+
+
+def replaceable(wrong):
+    """
+    May `wrong` (what Scribe typed) become a find-and-replace? Only when it
+    holds a word that isn't everyday English ("Koushi", "versel"). A
+    correction rewrites EVERY later dictation, so "their" -> "Theo" or "the
+    rest" -> "Theresa" would rewrite ordinary sentences - those fixes teach
+    the name as a word to listen for instead (the voice model's hints).
+    """
+    words = [w for _s, _e, w in _word_spans(_plain(wrong))]
+    return bool(words) and not _everyday(words)
 
 
 def _joined(text, spans, j):
@@ -311,12 +359,18 @@ def _is_fix(wrong_words, right_words, right_text):
         None, "".join(wrong_words).lower(), "".join(right_words).lower()).ratio()
     if alike < FIX_SIMILARITY:
         return False                                   # a different word, not a spelling
-    # Everyday words on both sides are grammar ("their" -> "there") - unless
-    # the fix is about writing them as one ("text two speech" ->
-    # "text-to-speech", "face book" -> "facebook").
-    if _everyday(wrong_words) and _everyday(right_words):
+    if _other_form(" ".join(wrong_words), " ".join(right_words)):
+        return False                                   # "API" -> "APIs": an ending, not a name
+    # There must be something to learn on the right: a word that isn't
+    # everyday English. Everyday words are grammar ("your" -> "you're",
+    # "cannot" -> "can not") - unless the fix writes them as ONE new word
+    # ("text two speech" -> "text-to-speech"; not "set up" -> "setup" or
+    # "may be" -> "maybe", which are words already, nor "and/or").
+    if _everyday(right_words):
         joins = any(c in _JOINERS for c in right_text) or len(right_words) < len(wrong_words)
-        if not joins:
+        if not joins or _everyday(["".join(right_words)]):
+            return False
+        if all(_plain(w).lower() in SUGGEST_STOP_WORDS for w in right_words):
             return False
     return True
 
@@ -329,9 +383,12 @@ def find_fixes(typed, final):
     kept exactly. Only real fixes count (see _is_fix): 1-3 words for 1-3
     words, alike in letters, no numbers, not grammar; a capitals-only change
     only for a word that isn't everyday ("kalshi" -> "Kalshi", never "apple"
-    -> "Apple"). More than FIX_MAX_CHANGES changes in one take is a rewrite:
-    nothing is learned from it.
+    -> "Apple"), and never where it starts a sentence ("...and deploying" ->
+    "... Deploying"). More than FIX_MAX_CHANGES changes in one take is a
+    rewrite: nothing is learned from it. Curly apostrophes count as straight
+    ones (the fix comes back with straight ones).
     """
+    typed, final = _plain(typed), _plain(final)
     a, b = _word_spans(typed), _word_spans(final)
     if not a or not b:
         return []
@@ -343,10 +400,11 @@ def find_fixes(typed, final):
         if tag == "equal":
             # Same words, maybe other capitals: each one is a change.
             for k in range(i2 - i1):
-                was, now = a[i1 + k][2], b[j1 + k][2]
+                (was_at, _e1, was), (now_at, _e2, now) = a[i1 + k], b[j1 + k]
                 if was != now:
                     changes += 1
-                    if not _everyday([now]):
+                    if not (_everyday([now]) or _starts_sentence(typed, was_at)
+                            or _starts_sentence(final, now_at)):
                         found.append((was, now))
             continue
         changes += 1
@@ -371,21 +429,35 @@ def find_region(before, after, text):
     characters just before and after it when Scribe typed it (either may be
     empty, at the start or end of the box). None when an anchor can't be
     found - the message was sent, the box cleared or rewritten.
+
+    An anchor shorter than ANCHOR_CHARS ran to the edge of the box, so it is
+    matched AT that edge first: after a dictation that ends the box, the
+    after-anchor is just Scribe's trailing space - searched for, it would be
+    found at the first space INSIDE Scribe's own words. An anchor of only
+    spaces that is no longer at the edge means you typed on past it: Scribe's
+    text is then followed to the edge (what you added shows up as added
+    words, which are never taken for fixes).
     """
     if text is None:
         return None
     start = 0
     if before:
-        i = text.find(before)
-        if i < 0:
-            return None
-        start = i + len(before)
+        if len(before) < ANCHOR_CHARS and text.startswith(before):
+            start = len(before)
+        elif before.strip():
+            i = text.find(before)
+            if i < 0:
+                return None
+            start = i + len(before)
     end = len(text)
     if after:
-        j = text.find(after, start)
-        if j < 0:
-            return None
-        end = j
+        if len(after) < ANCHOR_CHARS and text.endswith(after) and len(text) - len(after) >= start:
+            end = len(text) - len(after)
+        elif after.strip():
+            j = text.find(after, start)
+            if j < 0:
+                return None
+            end = j
     return text[start:end]
 
 
@@ -396,10 +468,12 @@ def find_region(before, after, text):
 def learn(vocab, right, wrong=None, source="fix", now=None):
     """
     Add a learned word to `vocab` (changed in place): `right` becomes a
-    term, and with `wrong` also the correction wrong -> right. `source` is
-    "fix" or "said"; `learned` records it, with the time (`now`, ISO text;
-    the current time by default). A word you removed (in `dismissed`) is
-    never learned again. Returns True if anything changed.
+    term, and with a `wrong` that isn't everyday English (see replaceable)
+    also the correction wrong -> right. `source` is "fix" or "said";
+    `learned` records it - with `wrong` either way, so the Dictionary page
+    can say what you fixed - and the time (`now`, ISO text; the current time
+    by default). A word you removed (in `dismissed`) is never learned again.
+    Returns True if anything changed.
     """
     right = (right or "").strip()
     wrong = (wrong or "").strip() or None
@@ -415,7 +489,7 @@ def learn(vocab, right, wrong=None, source="fix", now=None):
     elif source == "fix" and terms[same[0]] != right:
         terms[same[0]] = right                    # your fixed spelling wins
         changed = True
-    if wrong:
+    if wrong and replaceable(wrong):
         corrections = vocab.setdefault("corrections", {})
         old = [w for w in corrections if str(w).strip().lower() == wrong.lower()]
         if [corrections[w] for w in old] != [right]:

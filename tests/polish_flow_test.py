@@ -238,6 +238,25 @@ def test_fix_that_polishes_the_last_dictation(app):
     print("PASS  'fix that' polishes the last dictation again with the live model.")
 
 
+def test_fix_that_ends_the_fix_watch_first(app):
+    # Polish's edits are Scribe's, not yours: the fix watcher must stop
+    # watching before "fix that" deletes and retypes the text.
+    fake = _groq(app, answer="We should fix it.")
+    order = []
+    app.fix_watcher = mock.MagicMock()
+    app.fix_watcher.interrupt.side_effect = lambda: order.append("stop watching")
+    app.last_output, app.last_duration = "okay so we should uh fix it ", 2.0
+    app.last_output_hwnd, app.last_output_logged = 123, False
+    app.last_output_app = ("App", "app.exe")
+    kbd = mock.MagicMock()
+    kbd.press.side_effect = lambda *_a: order.append("type")
+    with mock.patch.object(app, "_get_groq_client", return_value=fake),          mock.patch.object(app, "restore_target_window", return_value=True),          mock.patch.object(app, "deliver", side_effect=lambda *_a, **_k: order.append("type")),          mock.patch.object(app, "kbd", kbd),          mock.patch.object(app, "_any_modifier_down", return_value=False):
+        app.ai_fix_last_output()
+    app.fix_watcher = None
+    assert order[:2] == ["stop watching", "type"], order[:3]
+    print("PASS  'fix that' ends the fix watch before it touches the text.")
+
+
 def test_fix_that_says_when_it_cant(app):
     import groq
     fake = _groq(app)
@@ -357,6 +376,7 @@ if __name__ == "__main__":
     test_a_slow_groq_never_holds_a_take_up(app)
     test_dictionary_corrections_win_over_the_model(app)
     test_fix_that_polishes_the_last_dictation(app)
+    test_fix_that_ends_the_fix_watch_first(app)
     test_fix_that_says_when_it_cant(app)
     test_groq_is_warmed_up_before_the_first_polish(app)
     test_fix_that_output_gets_the_dictionary(app)

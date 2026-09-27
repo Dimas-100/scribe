@@ -2418,6 +2418,7 @@ def ai_fix_last_output():
                    "was changed.", cooldown=0)
             return
         time.sleep(0.05)
+        _stop_fix_watch()             # polish's edits aren't your fixes
         with _injecting():
             for _ in range(len(original)):
                 kbd.press(keyboard.Key.backspace)
@@ -3373,6 +3374,7 @@ def _deliver_job(output, hwnd, app_name, app_exe, seq, duration, log_text,
         if focused:
             time.sleep(0.05)  # give the focus change a moment to take effect
             print(f"[{'PASTE' if PASTE_MODE else 'TYPED'}] {output.strip()}")
+            _stop_fix_watch()
             deliver(output, private=not _is_remote_client(app_exe))
         elif log_text is None:
             # A voice command's lone line break: nothing worth a clipboard
@@ -3598,6 +3600,7 @@ def undo_last(seq=None, from_chord=False):
                        "nothing was deleted.", cooldown=0)
                 return
             time.sleep(0.05)
+            _stop_fix_watch()             # Scribe's deletes aren't your fixes
             # One Backspace per delivered character (trailing space included).
             with _injecting():
                 for _ in range(len(text)):
@@ -4909,8 +4912,12 @@ def poll_ui_queue():
 #
 #  Two ways, both switched by LEARN_WORDS:
 #    - the fix watcher (its own thread, started in main()) reads back the text
-#      box each dictation was typed into; a word you correct there becomes a
-#      correction - _learn_word(right, wrong, "fix"), with one notice;
+#      box each dictation was typed into; a word you correct there is learned
+#      - _learn_word(right, wrong, "fix"), with one notice - as a word to
+#      listen for, and as a correction when what Scribe typed isn't everyday
+#      English (learning.replaceable). Before Scribe types into a window
+#      again, _stop_fix_watch() ends the current watch, so Scribe's own text
+#      is never taken for your fix;
 #    - _learn_from_dictation() counts the words of each dictation; a name
 #      said often enough (learning.auto_terms) is added quietly.
 #  Both change vocabulary.json through storage and reload it here, so the
@@ -4926,13 +4933,17 @@ _fix_watch_logged = {}             # where -> time.monotonic() of its last log l
 
 def _learn_word(right, wrong=None, source="fix"):
     """
-    Add a learned word to the Dictionary: `right` as a term and, with
-    `wrong`, the correction wrong -> right (learning.learn - never a word you
-    removed). Saved, then reloaded here, so the next dictation uses it. A
-    fix is announced once; a name said often is added quietly. Returns True
-    if the Dictionary changed. Safe from any thread.
+    Add a learned word to the Dictionary: `right` as a term and, with a
+    `wrong` that isn't everyday English, the correction wrong -> right
+    (learning.learn - never a word you removed). Saved, then reloaded here,
+    so the next dictation uses it. A fix is announced once; a name said often
+    is added quietly. Nothing is learned while learning is switched off (a
+    watch that was running when you switched it off ends with nothing).
+    Returns True if the Dictionary changed. Safe from any thread.
     """
     global _TRANSCRIBE_PROMPT_CACHE
+    if not LEARN_WORDS:
+        return False
     with vocab_lock:
         try:
             # Read the FILE, not memory: the dashboard may have just changed it.
@@ -4948,9 +4959,18 @@ def _learn_word(right, wrong=None, source="fix"):
     print(f"[LEARN] {right}" + (f" (was heard as \"{wrong}\")" if wrong else " (said often)"))
     if source == "fix":
         notify(f"learned:{right.lower()}", f"Learned “{right}”",
-               "Scribe will spell it that way from now on. You can remove it on "
+               "Scribe will listen for it from now on. You can remove it on "
                "the Dictionary page.", cooldown=0)
     return True
+
+
+def _stop_fix_watch():
+    """Scribe is about to type into a window (a dictation, "scratch that",
+    "fix that"): end the fix watcher's current watch FIRST, on the reads it
+    already has - otherwise Scribe's own words, typed over a word you
+    selected, would be learned as your fix. A counter bump; never blocks."""
+    if fix_watcher is not None:
+        fix_watcher.interrupt()
 
 
 def _build_learning_index(skip_text=None):

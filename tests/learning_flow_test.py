@@ -39,22 +39,41 @@ def _titles(app):
 
 def test_a_learned_fix_applies_to_the_next_dictation(app):
     _fresh(app)
-    assert app._learn_word("Kalshee", "cal she", "fix") is True
+    assert app._learn_word("Kalshee", "Koushi", "fix") is True
     saved = app.storage.load_vocab()[0]
-    assert saved["corrections"] == {"cal she": "Kalshee"} and "Kalshee" in saved["terms"]
+    assert saved["corrections"] == {"koushi": "Kalshee"} and "Kalshee" in saved["terms"]
     assert saved["learned"]["kalshee"]["from"] == "fix"
-    assert app.apply_vocabulary("ask cal she now") == "ask Kalshee now", "live, no restart"
+    assert app.apply_vocabulary("ask Koushi now") == "ask Kalshee now", "live, no restart"
     assert "Kalshee" in app.build_transcribe_prompt(), "the prompt cache was rebuilt"
     assert _titles(app) == ["Learned “Kalshee”"], _titles(app)
-    assert app._learn_word("Kalshee", "cal she", "fix") is False, "nothing new: no second notice"
+    assert app._learn_word("Kalshee", "Koushi", "fix") is False, "nothing new: no second notice"
     assert _titles(app) == ["Learned “Kalshee”"]
     print("PASS  a fix is learned, saved, used from the next dictation, and announced once.")
 
 
+def test_a_fix_of_everyday_words_teaches_the_name_only(app):
+    _fresh(app)
+    assert app._learn_word("Kalshee", "cal she", "fix") is True
+    assert "Kalshee" in app.VOCAB_TERMS and "Kalshee" in app.build_transcribe_prompt()
+    assert app.apply_vocabulary("we cal she later") == "we cal she later", \
+        "everyday words are never rewritten"
+    assert _titles(app) == ["Learned “Kalshee”"]
+    print("PASS  a fix of everyday words adds the name to listen for - no find-and-replace.")
+
+
+def test_nothing_is_learned_while_switched_off(app):
+    _fresh(app)
+    app.LEARN_WORDS = False                    # e.g. a watch that was running when you switched it off
+    assert app._learn_word("Kalshee", "Koushi", "fix") is False
+    assert app.storage.load_vocab()[0]["terms"] == [] and not _titles(app)
+    app.LEARN_WORDS = True
+    print("PASS  with learning switched off, a late fix is not learned.")
+
+
 def test_a_removed_word_is_never_learned(app):
     _fresh(app, {"terms": [], "corrections": {}, "dismissed": ["kalshee"]})
-    assert app._learn_word("Kalshee", "cal she", "fix") is False
-    assert app.apply_vocabulary("ask cal she now") == "ask cal she now" and not _titles(app)
+    assert app._learn_word("Kalshee", "Koushi", "fix") is False
+    assert app.apply_vocabulary("ask Koushi now") == "ask Koushi now" and not _titles(app)
     print("PASS  a word you removed is never learned again.")
 
 
@@ -110,6 +129,36 @@ def test_a_delivery_is_watched(app):
     print("PASS  a typed dictation is watched for fixes; clipboard fallbacks and 'off' aren't.")
 
 
+def test_scribe_ends_the_watch_before_it_types(app):
+    # Re-dictating over a word, or "scratch that": what Scribe types into a
+    # watched box must never be learned as your fix.
+    _fresh(app)
+    order = []
+    app.fix_watcher = mock.MagicMock()
+    app.fix_watcher.interrupt.side_effect = lambda: order.append("stop watching")
+
+    def typing(*_a, **_k):
+        order.append("type")
+    with mock.patch.object(app, "restore_target_window", return_value=True), \
+         mock.patch.object(app, "deliver", side_effect=typing), \
+         mock.patch.object(app, "_any_modifier_down", return_value=False):
+        app._deliver_job("Ask Kelsey. ", 321, "App", "app.exe", None, 1.0, log_text="Ask Kelsey.")
+    assert order[:2] == ["stop watching", "type"], order
+    order.clear()
+    with app.undo_lock:
+        app.last_output, app.last_output_hwnd, app.last_output_logged = "Ask Kelsey. ", 321, False
+        app.last_output_app = ("App", "app.exe")
+    kbd = mock.MagicMock()
+    kbd.press.side_effect = typing
+    with mock.patch.object(app, "restore_target_window", return_value=True), \
+         mock.patch.object(app, "_any_modifier_down", return_value=False), \
+         mock.patch.object(app, "kbd", kbd):
+        app.undo_last()
+    assert order[:2] == ["stop watching", "type"], order[:3]
+    app.fix_watcher = None
+    print("PASS  Scribe ends the fix watch before it types or deletes anything.")
+
+
 def test_dictionary_fixes_are_counted_in_the_history(app):
     _fresh(app, {"terms": ["Kalshee"], "corrections": {"cal she": "Kalshee"}})
     with mock.patch.object(app, "_transcribe_take", return_value=("ask cal she and cal she", "local")), \
@@ -145,10 +194,13 @@ def test_your_own_words_come_first(app):
 if __name__ == "__main__":
     app = import_app_with_mocks()
     test_a_learned_fix_applies_to_the_next_dictation(app)
+    test_a_fix_of_everyday_words_teaches_the_name_only(app)
+    test_nothing_is_learned_while_switched_off(app)
     test_a_removed_word_is_never_learned(app)
     test_names_said_often_are_added_quietly(app)
     test_the_index_starts_from_the_history(app)
     test_a_delivery_is_watched(app)
+    test_scribe_ends_the_watch_before_it_types(app)
     test_dictionary_fixes_are_counted_in_the_history(app)
     test_your_own_words_come_first(app)
     print("\nAll learning flow tests passed.")

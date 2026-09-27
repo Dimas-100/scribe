@@ -230,14 +230,24 @@ name and bypasses it). Small shared modules sit under both processes:
   `auto_terms()` (names said >= 5 times, >= 60% Capitalized mid-sentence or an
   acronym, not COMMON_WORDS, one spelling >= 80%, not a variant - difflib
   >= 0.5 - of a known word or of a candidate said 2x as often), `find_fixes()`
-  (1-3 words -> 1-3 words, alike, no digits, not grammar unless it joins words
-  "text-to-speech", capitals-only only for rare words, <= 3 changes),
-  `find_region()`, `learn()` / `forget()` (forget dismisses: never learned
-  again).
+  (1-3 words -> 1-3 words, alike, no digits, the right side not all everyday
+  words unless it writes them as one NEW word "text-to-speech" - not "setup",
+  "maybe", "and/or" -, not another form "API" -> "APIs" / "Webull's", ’ = ',
+  capitals-only only for rare words and never at a sentence or line start,
+  <= 3 changes), `find_region()` (an anchor shorter than 40 chars ran to the
+  box's edge and is matched there first - Scribe's trailing space),
+  `learn()` (a correction only when `replaceable(wrong)`: what Scribe typed
+  holds a word that isn't everyday English - "Koushi"; "cal she", "their",
+  "the rest" teach the term only, so ordinary sentences are never rewritten)
+  / `forget()` (forget dismisses: never learned again).
 - `fix_watch.py` (app only) — `FixWatcher`: ONE thread that reads back the
-  box a dictation was typed into (0.25 s settle, every 2 s, up to 60 s; a new
-  dictation or an emptied box ends it after a last read) and hands each fix
-  to `on_fix`. A Reader is injected (`uia_text.Reader` in the app).
+  box a dictation was typed into (0.25 s settle, every 2 s, up to 60 s) and
+  hands each fix to `on_fix`. `interrupt()` - called BEFORE Scribe types
+  (a dictation, undo, "fix that") - ends the current watch on the reads
+  made before it (a later read could hold Scribe's own text); an emptied
+  box ends it too (the last good read counts); `enabled = False` ends it
+  learning nothing. A failure inside a watch ends only that watch. A
+  Reader is injected (`uia_text.Reader` in the app).
 - `uia_text.py` (app only) — Windows UI Automation via `comtypes`:
   `focused_box(hwnd)` (same process, never a password box, TextPattern or
   ValuePattern), `read(box)` (<= 20,000 chars, never raises). Created on the
@@ -293,7 +303,11 @@ The main threads:
   the file, `learning.learn`, save, `load_vocabulary()`, reset the Whisper
   prompt cache, one `learned:<word>` notice). `_learn_from_dictation()` (the
   worker thread) keeps `_learning_index` - built from the history on first
-  use - and adds `auto_terms()` quietly. `LEARN_WORDS` switches both.
+  use - and adds `auto_terms()` quietly. `LEARN_WORDS` switches both
+  (`_learn_word` refuses while it's off). `_stop_fix_watch()` runs inside
+  `deliver_lock` right before `deliver()`, `undo_last`'s and "fix that"'s
+  Backspaces. Removing a word from "Your words" dismisses it; adding it
+  back by hand un-dismisses it.
 - **ElevenLabs session threads** (one per streamed dictation, in
   `elevenlabs_stream`) — `start_recording()` opens one when ElevenLabs is the
   usable service (`_eleven_configured()` + not paused, or the only backend);

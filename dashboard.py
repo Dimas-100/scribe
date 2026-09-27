@@ -1457,6 +1457,16 @@ class JsApi:
         _write_vocab_raw(raw)   # raises -> the page shows "Could not save"
         signal_reload()         # app.py re-reads vocabulary.json -> live next dictation
 
+    @staticmethod
+    def _undismiss(raw, word):
+        """You added `word` by hand: it may be learned again (a word you
+        removed once is otherwise never learned). True if it was dismissed."""
+        key = (word or "").strip().lower()
+        kept = [d for d in raw.get("dismissed", []) if str(d).strip().lower() != key]
+        changed = len(kept) != len(raw.get("dismissed", []))
+        raw["dismissed"] = kept
+        return changed
+
     def add_vocab_term(self, term):
         """Add a word Scribe should know. The same word with different
         capitals REPLACES the old spelling (your latest spelling wins). The
@@ -1473,7 +1483,7 @@ class JsApi:
                 raw["terms"] = [term if str(t).strip().lower() == term.lower() else t
                                 for t in raw["terms"]]
                 result = "updated"
-        if result != "exists":
+        if self._undismiss(raw, term) or result != "exists":
             self._save_vocab(raw)
         state = self._vocab_state()
         state["result"] = result
@@ -1494,14 +1504,19 @@ class JsApi:
                 raw["terms"][same[0]] = right
             else:
                 raw["terms"].append(right)
+            self._undismiss(raw, right)
         self._save_vocab(raw)
         return self._vocab_state()
 
     def remove_vocab_term(self, term):
+        """A word you remove is remembered as removed (`dismissed`), so
+        Scribe never adds it back as a name you say often."""
         key = (term or "").strip().lower()
         raw = _read_vocab_raw()
         raw["terms"] = [t for t in raw["terms"]
                         if str(t).strip().lower() != key]
+        if key and key not in [str(d).strip().lower() for d in raw.get("dismissed", [])]:
+            raw.setdefault("dismissed", []).append(key)
         self._save_vocab(raw)
         return self._vocab_state()
 

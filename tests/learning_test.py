@@ -150,6 +150,52 @@ def test_find_fixes_ignores_everything_else():
     print("PASS  find_fixes ignores rewrites, grammar, numbers, additions and deletions.")
 
 
+def test_find_fixes_ignores_grammar_with_curly_apostrophes():
+    # Word and Outlook turn a typed ' into ’ - still grammar, not a name.
+    ff = learning.find_fixes
+    assert ff("I think your right", "I think you’re right") == []
+    assert ff("were late again", "we’re late again") == []
+    assert ff("its fine now", "it’s fine now") == []
+    assert ff("lets go now", "let’s go now") == []
+    print("PASS  your -> you're, its -> it's with curly apostrophes are grammar, not fixes.")
+
+
+def test_find_fixes_ignores_word_endings():
+    # Possessives, plurals and verb forms are edits, not mishearings: learning
+    # "API" -> "APIs" would type "APIs" for every "API" after.
+    ff = learning.find_fixes
+    assert ff("check the Webull app", "check the Webull's app") == []
+    assert ff("read the API docs", "read the APIs docs") == []
+    assert ff("the repo is big", "the repos is big") == []
+    assert ff("please summarize it", "please summarized it") == []
+    assert ff("we deploy now", "we deploying now") == []
+    assert ff("we make it", "we making it") == []
+    print("PASS  possessives, plurals and verb endings are never learned.")
+
+
+def test_find_fixes_ignores_capitals_that_start_a_sentence():
+    ff = learning.find_fixes
+    assert ff("done and deploying now", "done. Deploying now") == [], "a new sentence"
+    assert ff("Done. Deploying now", "Done, deploying now") == [], "two sentences joined"
+    assert ff("the kalshee market", "the Kalshee market") == [("kalshee", "Kalshee")], \
+        "mid-sentence it is still learned"
+    print("PASS  a capital that only starts (or stops starting) a sentence isn't learned.")
+
+
+def test_find_fixes_ignores_joined_everyday_words():
+    ff = learning.find_fixes
+    assert ff("let me set up the call", "let me setup the call") == [], "setup is a word"
+    assert ff("it may be late", "it maybe late") == []
+    assert ff("we train every day", "we train everyday") == []
+    assert ff("I cannot go", "I can not go") == [], "split into everyday words"
+    assert ff("that is alright", "that is all right") == []
+    assert ff("this and or that", "this and/or that") == [], "only little words"
+    assert ff("my face book page", "my facebook page") == [("face book", "facebook")]
+    assert ff("the text two speech demo", "the text-to-speech demo") == \
+        [("text two speech", "text-to-speech")]
+    print("PASS  joining or splitting everyday words is grammar, unless it makes a new word.")
+
+
 def test_find_region():
     fr = learning.find_region
     assert fr("Hi ", " Bye", "Hi fixed words Bye") == "fixed words"
@@ -161,21 +207,52 @@ def test_find_region():
     print("PASS  find_region finds Scribe's text between its anchors, or says it's gone.")
 
 
+def test_find_region_at_the_edges_of_the_box():
+    # Scribe adds a space after each dictation: when its text ends the box,
+    # the after-anchor is just that space - it must match at the END of the
+    # box, not at the first space inside Scribe's own words.
+    fr = learning.find_region
+    assert fr("Hi ", " ", "Hi fixed words ") == "fixed words"
+    assert fr("", " ", "fixed words ") == "fixed words"
+    assert fr("Hi ", " ", "Hi fixed words and more") == "fixed words and more", \
+        "typed on after it: followed to the end of the box"
+    assert fr("Hi ", " Bye", "Hi fixed words Bye") == "fixed words"
+    assert fr(" ", "", "   fixed words") == "  fixed words", "a leading space matches at the start"
+    print("PASS  an anchor that ran to the edge of the box is matched at that edge.")
+
+
 # --- Adding and removing a learned word --------------------------------------
+
+def test_everyday_words_are_never_replaced():
+    # A fix whose wrong side is everyday English teaches the name as a word
+    # to listen for, but never becomes a find-and-replace: "their" -> "Theo"
+    # would rewrite every later "their".
+    for wrong, right in [("their", "Theo"), ("so we", "Zoe"), ("me a", "Mia"),
+                         ("and a", "Anna"), ("the rest", "Theresa"), ("shown", "Shawn"),
+                         ("cal she", "Kalshee"), ("you’re", "Yuri")]:
+        v = _vocab()
+        assert learning.learn(v, right, wrong, "fix", now="t"), wrong
+        assert v["terms"] == [right] and v["corrections"] == {}, (wrong, v)
+        assert v["learned"][right.lower()]["wrong"] == wrong, "the page still says what you fixed"
+    v = _vocab()
+    assert learning.learn(v, "Kalshee", "Koushi", "fix", now="t")
+    assert v["corrections"] == {"koushi": "Kalshee"}, "a mishearing that isn't a word is replaced"
+    print("PASS  a fix of everyday words teaches the name, never a find-and-replace.")
+
 
 def test_learn_and_forget():
     v = _vocab(terms=["Sam"])
-    assert learning.learn(v, "Kalshee", "cal she", "fix", now="2026-09-27T10:00:00")
-    assert v["terms"][-1] == "Kalshee" and v["corrections"]["cal she"] == "Kalshee"
-    assert v["learned"]["kalshee"] == {"from": "fix", "at": "2026-09-27T10:00:00", "wrong": "cal she"}
-    assert not learning.learn(v, "Kalshee", "cal she", "fix"), "nothing new"
+    assert learning.learn(v, "Kalshee", "Koushi", "fix", now="2026-09-27T10:00:00")
+    assert v["terms"][-1] == "Kalshee" and v["corrections"]["koushi"] == "Kalshee"
+    assert v["learned"]["kalshee"] == {"from": "fix", "at": "2026-09-27T10:00:00", "wrong": "Koushi"}
+    assert not learning.learn(v, "Kalshee", "Koushi", "fix"), "nothing new"
     assert learning.learn(v, "Webull", source="said", now="2026-09-27T11:00:00")
     assert v["learned"]["webull"] == {"from": "said", "at": "2026-09-27T11:00:00"}
     assert learning.forget(v, "Kalshee")
-    assert "Kalshee" not in v["terms"] and "cal she" not in v["corrections"]
+    assert "Kalshee" not in v["terms"] and "koushi" not in v["corrections"]
     assert "kalshee" in v["dismissed"] and "kalshee" not in v["learned"]
     assert v["terms"] == ["Sam", "Webull"], "other words stay"
-    assert not learning.learn(v, "Kalshee", "cal she"), "a removed word never comes back"
+    assert not learning.learn(v, "Kalshee", "Koushi"), "a removed word never comes back"
     assert not learning.forget(v, "never-there")
     print("PASS  learn adds a word (and its fix); forget removes it for good.")
 
@@ -200,7 +277,13 @@ if __name__ == "__main__":
     test_is_variant()
     test_find_fixes_learns_real_fixes()
     test_find_fixes_ignores_everything_else()
+    test_find_fixes_ignores_grammar_with_curly_apostrophes()
+    test_find_fixes_ignores_word_endings()
+    test_find_fixes_ignores_capitals_that_start_a_sentence()
+    test_find_fixes_ignores_joined_everyday_words()
     test_find_region()
+    test_find_region_at_the_edges_of_the_box()
+    test_everyday_words_are_never_replaced()
     test_learn_and_forget()
     test_learn_keeps_a_manual_term_and_updates_capitals()
     print("\nAll learning tests passed.")

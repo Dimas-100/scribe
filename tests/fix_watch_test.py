@@ -59,6 +59,63 @@ def test_a_fix_is_learned():
     print("PASS  a word you fix after Scribe typed it is learned.")
 
 
+def test_a_fix_is_learned_when_scribes_text_ends_the_box():
+    # Scribe adds a space after each dictation (the default), and the box
+    # keeps it: the text is followed to the end of the box, not to the first
+    # space inside it.
+    for before in ("", "Hello. "):
+        reader = FakeReader({1: [before + "ask cal she about it ", before + "ask Kalshee about it "]})
+        w, fixes, errors = _watcher(reader)
+        w.watch(1, "ask cal she about it ")
+        assert w.wait_idle(3)
+        assert fixes == [("cal she", "Kalshee")] and not errors, (before, fixes, errors)
+    print("PASS  a fix is learned when Scribe's text (and its trailing space) ends the box.")
+
+
+def test_scribes_own_typing_is_never_a_fix():
+    # You select "cal she" and dictate it again: Scribe types the new take
+    # over it. That is Scribe's text, not your fix.
+    reader = FakeReader({1: ["ask cal she about it"]})
+    w, fixes, _errors = _watcher(reader, watch=3.0)
+    w.watch(1, "ask cal she about it")
+    time.sleep(0.1)
+    w.interrupt()                              # Scribe is about to type into the box...
+    reader.boxes[1] = ["ask Kelsey about it"]  # ...and does
+    time.sleep(0.1)
+    w.watch(1, "Kelsey")
+    time.sleep(0.1)
+    w.stop()
+    w.thread.join(2)
+    assert fixes == [], fixes
+    print("PASS  what Scribe itself types into a watched box is never learned as a fix.")
+
+
+def test_an_unexpected_failure_never_kills_the_watcher():
+    class Odd(FakeReader):
+        def read(self, box):
+            return 42 if box == 5 else super().read(box)
+    reader = Odd({5: ["x"], 1: ["ask cal she now", "ask Kalshee now"]})
+    w, fixes, errors = _watcher(reader)
+    w.watch(5, "whatever")
+    assert w.wait_idle(3), "the watch ended"
+    w.watch(1, "ask cal she now")
+    assert w.wait_idle(3) and w.thread.is_alive()
+    assert fixes == [("cal she", "Kalshee")] and "watch" in errors, (fixes, errors)
+    print("PASS  an unexpected failure ends that watch, never the watcher.")
+
+
+def test_switching_off_ends_the_watch():
+    reader = FakeReader({1: ["ask cal she now", "ask cal she now", "ask cal she now",
+                             "ask Kalshee now"]})
+    w, fixes, _errors = _watcher(reader, poll=0.05, watch=2.0)
+    w.watch(1, "ask cal she now")
+    time.sleep(0.02)
+    w.enabled = False                          # Settings: learning switched off
+    assert w.wait_idle(3)
+    assert fixes == [] and len(reader.reads) <= 2, (fixes, reader.reads)
+    print("PASS  switching learning off stops the watch at once - nothing more is read.")
+
+
 def test_a_sent_message_keeps_the_last_good_read():
     reader = FakeReader({1: ["ask cal she about it", "ask Kalshee about it", ""]})
     w, fixes, _errors = _watcher(reader, watch=5.0)
@@ -88,12 +145,12 @@ def test_a_new_dictation_ends_the_old_watch():
     time.sleep(0.15)
     w.watch(2, "web bull rocks")
     time.sleep(0.15)
-    w.stop()                                   # ends the second watch too (after a last read)
+    w.stop()                                   # ends the second watch too (on its reads so far)
     w.thread.join(2)
     assert not w.thread.is_alive()
     assert fixes == [("cal she", "Kalshee"), ("web bull", "Webull")], fixes
     assert time.monotonic() - started < 2, "neither watch ran its full time"
-    print("PASS  a new dictation ends the previous watch (after one last read); stop ends it all.")
+    print("PASS  a new dictation ends the previous watch (on its reads so far); stop ends it all.")
 
 
 def test_unreadable_boxes_are_skipped():
@@ -144,6 +201,10 @@ def test_off_and_broken():
 
 if __name__ == "__main__":
     test_a_fix_is_learned()
+    test_a_fix_is_learned_when_scribes_text_ends_the_box()
+    test_scribes_own_typing_is_never_a_fix()
+    test_an_unexpected_failure_never_kills_the_watcher()
+    test_switching_off_ends_the_watch()
     test_a_sent_message_keeps_the_last_good_read()
     test_words_you_add_are_not_fixes()
     test_a_new_dictation_ends_the_old_watch()

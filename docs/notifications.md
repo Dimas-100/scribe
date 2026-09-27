@@ -33,6 +33,6 @@ one notice, not one per dictation.
 | `recording_limit` | Recording limit reached | Scribe transcribed the first 5 minutes. Release the hotkey and start a new dictation to keep going. |
 | `history_failed` | Couldn't update your history | Your text was handled, but Scribe couldn't update its history file. Details are in the error log. |
 | `settings_recovered` | Settings restored | Your settings file couldn't be read, so Scribe restored the last working copy. The damaged file was kept as {file}. |
-| `learned:<word>` | Learned “{word}” | Scribe will spell it that way from now on. You can remove it on the Dictionary page. |
+| `learned:<word>` | Learned “{word}” | Scribe will listen for it from now on. You can remove it on the Dictionary page. |
 | `update` | Scribe {version} is available | Open Scribe's Settings → About and click Update now. It takes about a minute. |
 | `background_error` | Something went wrong | Scribe kept running. Details are in the error log (tray → Open data folder). |

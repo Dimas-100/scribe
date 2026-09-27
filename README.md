@@ -16,8 +16,8 @@ wherever your cursor is: an email, a chat, a document, a code editor, a browser.
 - **Free with one free key.** No subscription and no account with us: you bring your own
   key from Groq, whose free tier covers everyday dictation.
 - **Private.** No sign-up, no tracking. Your history stays on your PC.
-- **Learns your words.** Fix a word once and Scribe spells it right from then on; names
-  you say often are learned too. No list to keep up with.
+- **Learns your words.** Fix a word once and Scribe learns it; names you say often are
+  learned too. No list to keep up with.
 
 ## Install (about 3 minutes)
 
@@ -125,10 +125,13 @@ words or fewer are left alone, and your Dictionary always has the last word.
 Scribe learns your names and jargon by itself, so there's nothing to keep up with:
 
 - **Fix a word once.** If Scribe types "cal she" and you correct it to "Kalshi" right
-  after, Scribe notices, learns it, and spells it right from then on — a small notice
-  tells you. This works in browsers (Gmail, ChatGPT, Slack on the web…), Office and most
-  chat apps; a few apps don't share their text (the VS Code editor, games, remote
-  desktops), and there Scribe simply doesn't learn.
+  after, Scribe notices and learns "Kalshi" — a small notice tells you — and your voice
+  model listens for it from then on. When what Scribe typed isn't a real word
+  ("Koushi"), Scribe also swaps it for your spelling every time; it never swaps
+  everyday words, so "their" can't turn into "Theo". This works in browsers (Gmail,
+  ChatGPT, Slack on the web…), Office and most chat apps; a few apps don't share their
+  text (the VS Code editor, games, remote desktops), and there Scribe simply doesn't
+  learn.
 - **Say it often.** A name or acronym you say at least five times (Webull, SCHD) is added
   to the words Scribe listens for — quietly. Everyday words and likely mishearings are
   left out.
@@ -163,7 +166,10 @@ settings and keys are never touched by an update.
   box, only for a minute, only on your PC — and saves nothing but the corrected word.
   Password boxes are never read. Switch it off in **Settings → Dictation**.
 - Your **keys** are stored by Windows (Credential Manager), encrypted with your sign-in.
-- Your **history, settings and Dictionary** stay on your PC, in `%APPDATA%\Scribe`.
+- With a cloud voice model, the words in your **Dictionary** (including the ones Scribe
+  learned) go along with each dictation as spelling hints, and to Groq with AI polish.
+- Your **history, settings and Dictionary** are stored only on your PC, in
+  `%APPDATA%\Scribe`.
 
 ## Your data
 

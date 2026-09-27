@@ -601,6 +601,24 @@ def test_removing_a_learned_word_is_for_good():
     print("PASS  removing a learned word takes its term and fix, and it never comes back.")
 
 
+def test_a_word_you_remove_by_hand_stays_gone():
+    # Removed from "Your words", a name must not come back as "You say it
+    # often" - and adding it back by hand is your call, so it is learnable
+    # again.
+    storage.save_vocab({"terms": ["Webull", "Sam"], "corrections": {}})
+    api = dashboard.JsApi()
+    with mock.patch.object(dashboard.instance, "send", return_value=True):
+        api.remove_vocab_term("Webull")
+        assert "webull" in storage.load_vocab()[0]["dismissed"]
+        api.add_vocab_term("Webull")
+        assert "webull" not in storage.load_vocab()[0]["dismissed"]
+        api.remove_vocab_term("Webull")
+        api.add_vocab_correction("web bull", "Webull")
+    vocab = storage.load_vocab()[0]
+    assert "webull" not in vocab["dismissed"] and "Webull" in vocab["terms"], vocab
+    print("PASS  a word you remove by hand stays gone - until you add it back.")
+
+
 def test_a_poll_brings_newly_learned_words():
     _log(["one"])
     storage.save_vocab({"terms": [], "corrections": {}})
@@ -667,6 +685,7 @@ if __name__ == "__main__":
     test_the_window_opens_in_the_theme_colour()
     test_the_page_gets_what_was_learned()
     test_removing_a_learned_word_is_for_good()
+    test_a_word_you_remove_by_hand_stays_gone()
     test_a_poll_brings_newly_learned_words()
     test_page_has_the_learning_parts()
     print("\nAll dashboard tests passed.")
