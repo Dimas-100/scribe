@@ -123,7 +123,9 @@ except ImportError as _missing:
 # lives and how it's saved safely, and which microphones exist.
 import devices
 import elevenlabs_stream
+import fix_watch
 import keystore
+import learning
 import model_manager
 import polish
 import storage
@@ -429,6 +431,11 @@ THEME = "system"
 CHECK_UPDATES = True
 UPDATE_NOTIFIED = ""          # the newest version you were already told about
 
+# The Dictionary fills itself: Scribe learns the words you fix after it types
+# them, and the names you say often (learning.py, fix_watch.py). Settings ->
+# Dictation -> "Learn my words automatically".
+LEARN_WORDS = True
+
 # --- Cloud pipelining. When on (and cloud is also on), Scribe runs a
 #     "speculative" Groq transcription every few seconds DURING the
 #     dictation. On release, if that result covers nearly all the audio,
@@ -585,7 +592,7 @@ def load_config():
     global PASTE_MODE, MIC_DEVICE, USER_NAME, SOUND_CUES
     global USE_CLOUD, GROQ_API_KEY, CLOUD_MODEL, PIPELINE_CLOUD, LOCAL_MODEL
     global CLOUD_PROVIDER, ELEVENLABS_API_KEY, POLISH, POLISH_STYLE, THEME
-    global CHECK_UPDATES, UPDATE_NOTIFIED
+    global CHECK_UPDATES, UPDATE_NOTIFIED, LEARN_WORDS
     cfg, notices = storage.load_config()
     # An API key still in config.json (older versions kept it there) moves
     # into Windows Credential Manager - once, verified - see keystore.py.
@@ -608,6 +615,7 @@ def load_config():
     THEME = cfg["theme"]
     CHECK_UPDATES = cfg["check_updates"]
     UPDATE_NOTIFIED = cfg["update_notified"]
+    LEARN_WORDS = cfg["learn_words"]
     current_hotkey_name = cfg["hotkey"]          # validated: always a known name
     HOTKEY = HOTKEY_CHOICES[current_hotkey_name]
     return notices
@@ -658,6 +666,9 @@ STARTUP_NOTICES.extend(load_config())
 #                       find-and-replace fix-up after transcription.
 VOCAB_TERMS = []
 VOCAB_CORRECTIONS = []
+# The whole vocabulary as loaded (terms, corrections, dismissed, and `learned`
+# - which words Scribe added by itself), for learning.py.
+VOCAB_DATA = {"terms": [], "corrections": {}, "dismissed": [], "learned": {}}
 
 # Correction keys that are ALSO everyday English words. We keep these OUT of
 # the forced find-and-replace (apply_vocabulary) so normal prose isn't
@@ -674,8 +685,9 @@ def load_vocabulary():
     are skipped) into VOCAB_TERMS and VOCAB_CORRECTIONS. A missing file just
     means no custom vocabulary. Returns notices, like load_config().
     """
-    global VOCAB_TERMS, VOCAB_CORRECTIONS
+    global VOCAB_TERMS, VOCAB_CORRECTIONS, VOCAB_DATA
     vocab, notices = storage.load_vocab()
+    VOCAB_DATA = vocab
     VOCAB_TERMS = vocab["terms"]
     # Drop corrections for words that are also ordinary English (see
     # VOCAB_SKIP_CORRECTIONS) so they aren't force-rewritten in normal prose.
@@ -692,6 +704,21 @@ def load_vocabulary():
 
 
 STARTUP_NOTICES.extend(load_vocabulary())
+
+
+def _ranked_terms():
+    """
+    The Dictionary's terms, least important first: the words Scribe learned
+    by itself (oldest first), then YOUR words, newest last. ElevenLabs' 50
+    priority words, the polish prompt and the Whisper prompt all take the
+    newest first when they run out of room - so a pile of learned words can
+    never push out a word you added yourself.
+    """
+    learned = VOCAB_DATA.get("learned") or {}
+    auto = [t for t in VOCAB_TERMS if str(t).strip().lower() in learned]
+    auto.sort(key=lambda t: learned[str(t).strip().lower()].get("at", ""))
+    mine = [t for t in VOCAB_TERMS if str(t).strip().lower() not in learned]
+    return auto + mine
 
 
 # =============================================================================
@@ -1678,7 +1705,7 @@ def stop_recording():
 # =============================================================================
 
 def log_dictation(text, duration_seconds, app_name=None, app_exe=None,
-                  engine=None, latency=None, raw=None):
+                  engine=None, latency=None, raw=None, fixed=0):
     """Append one dictation to the log file as a single JSON line. The app is
     passed in (captured when the recording started), never read from the
     globals - the next dictation may already have changed those."""
@@ -1706,6 +1733,9 @@ def log_dictation(text, duration_seconds, app_name=None, app_exe=None,
     if raw:
         entry["raw"] = raw
         entry["polished"] = True
+    # How many words your Dictionary corrected in it (Insights counts them).
+    if fixed:
+        entry["fixed"] = fixed
     # storage serializes appends, so two dictations can never interleave.
     storage.append_jsonl(LOG_FILE, entry)
 
@@ -2179,14 +2209,27 @@ def apply_vocabulary(text):
     Runs LAST in the pipeline, after clean_text(), so the exact casing from
     vocabulary.json is the final word - clean_text() cannot re-touch it.
     """
+    return _apply_vocabulary_counted(text)[0]
+
+
+def _apply_vocabulary_counted(text):
+    """apply_vocabulary(), plus how many words it really changed (a word
+    already spelled right isn't counted) - the history keeps that number for
+    Insights' "the Dictionary fixed N words for you"."""
+    fixed = [0]
+
+    def replace(match, right):
+        if match.group(0) != right:
+            fixed[0] += 1
+        return right
     for wrong, right in VOCAB_CORRECTIONS:
         pattern = r"\b" + re.escape(wrong) + r"\b"
         # The replacement is passed as a function (not a string) so any
         # special characters in 'right' - like the & in "A&M" - are inserted
         # literally, not read as a regex backreference.
-        text = re.sub(pattern, lambda m, r=right: r, text,
+        text = re.sub(pattern, lambda m, r=right: replace(m, r), text,
                       flags=re.IGNORECASE)
-    return text
+    return text, fixed[0]
 
 
 def apply_voice_commands(text):
@@ -2324,7 +2367,7 @@ def ai_fix_last_output():
 
     print("[FIX]   Polishing the last dictation via Groq...")
     try:
-        cleaned = polish.polish(original.strip(), _get_groq_client(), VOCAB_TERMS,
+        cleaned = polish.polish(original.strip(), _get_groq_client(), _ranked_terms(),
                                 name=USER_NAME, timeout=polish.FIX_TIMEOUT)
     except polish.PolishError as exc:
         # The user asked for this and is waiting: say what happened. (The
@@ -2414,7 +2457,7 @@ def build_transcribe_prompt():
             # large vocabulary can't crowd the punctuation hint out of
             # Whisper's ~224-token prompt window (see MAX_PROMPT_VOCAB_CHARS).
             kept, used = [], 0
-            for term in VOCAB_TERMS:
+            for term in reversed(_ranked_terms()):   # yours and the newest first
                 add = len(str(term)) + 2          # +2 for the ", " separator
                 if used + add > MAX_PROMPT_VOCAB_CHARS and kept:
                     break
@@ -2809,7 +2852,7 @@ def _start_stream_session():
     """Open this dictation's ElevenLabs stream (it connects on its own
     thread). None if even that failed - the take then goes the usual way."""
     try:
-        terms = elevenlabs_stream.keyterms(VOCAB_TERMS, USER_NAME)
+        terms = elevenlabs_stream.keyterms(_ranked_terms(), USER_NAME)
         return elevenlabs_stream.Session(ELEVENLABS_API_KEY, terms).start()
     except Exception as exc:
         storage.log_error("start ElevenLabs stream", exc)
@@ -2913,7 +2956,7 @@ def _polish_take(text):
         return text, False
     t0 = time.perf_counter()
     try:
-        out = polish.polish(text, _get_groq_client(), VOCAB_TERMS, name=USER_NAME,
+        out = polish.polish(text, _get_groq_client(), _ranked_terms(), name=USER_NAME,
                             style=POLISH_STYLE)
     except polish.PolishError as exc:
         print(f"[POLISH] Skipped ({exc.kind}).")
@@ -3304,15 +3347,16 @@ def _copy_for_user(text):
 
 
 def _deliver_job(output, hwnd, app_name, app_exe, seq, duration, log_text,
-                 engine=None, released_at=None, raw=None):
+                 engine=None, released_at=None, raw=None, fixed=0):
     """
     Deliver one dictation's `output` - in its turn, once the modifiers are
     up, into its own window - or, if that window is gone, leave it on the
     clipboard and say so. `log_text` (None for a voice command's line break)
     is what goes into the history, with `engine` (the service that
-    transcribed it), the seconds since `released_at`, and - when AI polish
-    changed it - the `raw` transcript. Arms undo only for text that really
-    landed in `hwnd`.
+    transcribed it), the seconds since `released_at`, how many words the
+    Dictionary `fixed`, and - when AI polish changed it - the `raw`
+    transcript. Arms undo only for text that really landed in `hwnd`, and
+    only such text is learned from (the fix watcher reads that box).
     """
     global last_output, last_duration, last_output_hwnd, last_output_logged
     global last_output_app
@@ -3351,7 +3395,7 @@ def _deliver_job(output, hwnd, app_name, app_exe, seq, duration, log_text,
         if log_text:
             try:
                 log_dictation(log_text, duration, app_name, app_exe,
-                              engine=engine, latency=latency, raw=raw)
+                              engine=engine, latency=latency, raw=raw, fixed=fixed)
                 logged = True
             except Exception as exc:
                 _write_error_log("log_dictation", exc)
@@ -3365,6 +3409,13 @@ def _deliver_job(output, hwnd, app_name, app_exe, seq, duration, log_text,
                 last_output_app = (app_name, app_exe)
             else:
                 last_output = ""      # nothing on screen for undo to remove
+    # Learning happens OUTSIDE the delivery lock (it reads and writes the
+    # Dictionary): the words of this dictation count toward names you say
+    # often, and the box it was typed into is watched for your fixes.
+    if focused and logged and LEARN_WORDS:
+        _learn_from_dictation(log_text)
+        if fix_watcher is not None:
+            fix_watcher.watch(hwnd, output)
 
 
 def process_audio(audio, hwnd, app_name=None, app_exe=None, seq=None,
@@ -3460,7 +3511,7 @@ def process_audio(audio, hwnd, app_name=None, app_exe=None, seq=None,
         #   apply_voice_commands - turn an inline "new line" into a line break
         text = remove_fillers(text)
         text = clean_text(text)
-        text = apply_vocabulary(text)
+        text, fixed = _apply_vocabulary_counted(text)
         text = apply_voice_commands(text)
 
         if not text:
@@ -3473,7 +3524,7 @@ def process_audio(audio, hwnd, app_name=None, app_exe=None, seq=None,
         # logged to history, and remembered for undo - see _deliver_job.
         _deliver_job(output, hwnd, app_name, app_exe, seq, duration,
                      log_text=text, engine=engine, released_at=released_at,
-                     raw=raw if polished else None)
+                     raw=raw if polished else None, fixed=fixed)
     except Exception as exc:
         # Last-resort guard: a failure in the dictation body must not leave
         # the app wedged. Log it (side-effect-free - does NOT touch the mic
@@ -4735,6 +4786,11 @@ def reload_config():
         eleven_paused_until = 0.0
     if (GROQ_API_KEY, POLISH) != old_polish:
         polish_paused_until = 0.0   # ...and the same for AI polish
+    if fix_watcher is not None:
+        # The switch applies at once - unless the watcher couldn't start at
+        # all (no UI Automation): then there's nothing to switch on.
+        fix_watcher.enabled = (LEARN_WORDS and fix_watcher.thread is not None
+                               and fix_watcher.thread.is_alive())
     _show_notices(notices)
     _warm_polish()                  # a new Groq key / polish switch: get it ready
     print("[CTL] config + vocabulary reloaded after dashboard save.")
@@ -4846,6 +4902,102 @@ def poll_ui_queue():
         pass
     # Schedule ourselves to run again in 100 milliseconds.
     root.after(100, poll_ui_queue)
+
+
+# =============================================================================
+#  LEARNING  -  the Dictionary fills itself (learning.py, fix_watch.py).
+#
+#  Two ways, both switched by LEARN_WORDS:
+#    - the fix watcher (its own thread, started in main()) reads back the text
+#      box each dictation was typed into; a word you correct there becomes a
+#      correction - _learn_word(right, wrong, "fix"), with one notice;
+#    - _learn_from_dictation() counts the words of each dictation; a name
+#      said often enough (learning.auto_terms) is added quietly.
+#  Both change vocabulary.json through storage and reload it here, so the
+#  word is used from the very next dictation. Removed words never return.
+# =============================================================================
+
+fix_watcher = None                 # a fix_watch.FixWatcher, from main()
+vocab_lock = threading.Lock()      # one learn at a time: read, change, save
+_learning_index = None             # learning.SuggestionIndex over the history
+_learning_index_lock = threading.Lock()
+_fix_watch_logged = {}             # where -> time.monotonic() of its last log line
+
+
+def _learn_word(right, wrong=None, source="fix"):
+    """
+    Add a learned word to the Dictionary: `right` as a term and, with
+    `wrong`, the correction wrong -> right (learning.learn - never a word you
+    removed). Saved, then reloaded here, so the next dictation uses it. A
+    fix is announced once; a name said often is added quietly. Returns True
+    if the Dictionary changed. Safe from any thread.
+    """
+    global _TRANSCRIBE_PROMPT_CACHE
+    with vocab_lock:
+        try:
+            # Read the FILE, not memory: the dashboard may have just changed it.
+            vocab, _notices = storage.load_vocab()
+            if not learning.learn(vocab, right, wrong, source):
+                return False
+            storage.save_vocab(vocab)
+        except storage.StorageError as exc:
+            storage.log_error("learn a word", exc)
+            return False
+        load_vocabulary()
+        _TRANSCRIBE_PROMPT_CACHE = None     # the Whisper prompt lists the terms
+    print(f"[LEARN] {right}" + (f" (was heard as \"{wrong}\")" if wrong else " (said often)"))
+    if source == "fix":
+        notify(f"learned:{right.lower()}", f"Learned “{right}”",
+               "Scribe will spell it that way from now on. You can remove it on "
+               "the Dictionary page.", cooldown=0)
+    return True
+
+
+def _build_learning_index(skip_text=None):
+    """The word counts over the whole history. `skip_text`: the dictation
+    being learned from right now, if it is already the newest line - it is
+    added by the caller, and must not count twice."""
+    entries = storage.read_jsonl(LOG_FILE)
+    if skip_text is not None and entries and entries[-1].get("text") == skip_text:
+        entries = entries[:-1]
+    index = learning.SuggestionIndex()
+    index.add([e for e in entries if isinstance(e.get("text"), str)])
+    return index
+
+
+def _learn_from_dictation(text):
+    """Count this dictation's words; add any name that now qualifies
+    (learning.auto_terms - said at least 5 times, a name, not a mishearing).
+    Never raises: learning must not cost you a dictation."""
+    global _learning_index
+    if not LEARN_WORDS or not isinstance(text, str) or not text.strip():
+        return
+    try:
+        with _learning_index_lock:
+            if _learning_index is None:
+                _learning_index = _build_learning_index(skip_text=text)
+            _learning_index.add([{"text": text}])
+            new_terms = learning.auto_terms(_learning_index, VOCAB_DATA)
+        for term in new_terms:
+            _learn_word(term, source="said")
+    except Exception as exc:
+        storage.log_error("learn from a dictation", exc)
+
+
+def _make_uia_reader():
+    """The fix watcher's Reader - made on its own thread (see fix_watch.py)."""
+    import uia_text
+    return uia_text.Reader()
+
+
+def _fix_watch_error(where, exc):
+    """The fix watcher's failures go to the error log - at most one line per
+    kind every 10 minutes (an app that can't be read would repeat it)."""
+    now = time.monotonic()
+    if where != "start" and now - _fix_watch_logged.get(where, -1e9) < 600:
+        return
+    _fix_watch_logged[where] = now
+    storage.log_error(f"learn from your fixes ({where})", exc)
 
 
 # =============================================================================
@@ -4977,6 +5129,15 @@ def main():
 
     # 3d. Once a day, see whether a newer Scribe is out.
     threading.Thread(target=_update_watcher, name="update-check", daemon=True).start()
+
+    # 3e. Learn from your fixes: a thread that reads back the box each
+    #     dictation was typed into (UI Automation - see fix_watch.py).
+    global fix_watcher
+    fix_watcher = fix_watch.FixWatcher(
+        _make_uia_reader, on_fix=lambda wrong, right: _learn_word(right, wrong, "fix"),
+        on_error=_fix_watch_error)
+    fix_watcher.enabled = LEARN_WORDS
+    fix_watcher.start()
 
     print()
     print(f"[READY] Listening - hold {current_hotkey_name} to dictate.")

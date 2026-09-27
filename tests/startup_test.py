@@ -23,6 +23,7 @@ CONSTANT_FOR_KEY = {
     "cloud_provider": "CLOUD_PROVIDER", "elevenlabs_api_key": "ELEVENLABS_API_KEY",
     "polish": "POLISH", "polish_style": "POLISH_STYLE", "theme": "THEME",
     "check_updates": "CHECK_UPDATES", "update_notified": "UPDATE_NOTIFIED",
+    "learn_words": "LEARN_WORDS",
 }
 
 

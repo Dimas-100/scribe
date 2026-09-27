@@ -375,10 +375,14 @@ DEFAULT_CONFIG = {
     "check_updates":      True,
     # The newest version Scribe has already told you about (one notice each).
     "update_notified":    "",
+    # Learn your words by itself: the fixes you make after Scribe types, and
+    # the names you say often (learning.py). Settings -> Dictation.
+    "learn_words":        True,
 }
 
 _BOOL_KEYS = ("add_trailing_space", "paste_mode", "sound_cues",
-              "use_cloud", "pipeline_cloud", "local_model", "polish", "check_updates")
+              "use_cloud", "pipeline_cloud", "local_model", "polish", "check_updates",
+              "learn_words")
 _TEXT_KEYS = ("user_name", "groq_api_key", "cloud_model", "elevenlabs_api_key",
               "update_notified")
 
