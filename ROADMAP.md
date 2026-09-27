@@ -35,6 +35,10 @@ a time.
   transcription: collapses whitespace, removes spaces before punctuation,
   capitalizes sentence starts and standalone "i". Deterministic and safe —
   no proper-noun guessing.
+- **A Dictionary that fills itself** — ✅ *Done (1.1).* Scribe learns the words you fix
+  right after it types them (it reads that text box back through Windows UI Automation)
+  and the names you say often; the Dictionary page lists what it learned, one click to
+  remove. Learning inside the VS Code editor would need its screen-reader mode.
 - **Custom vocabulary** — ✅ *Done.* Two layers: terms from `vocabulary.json`
   are appended to Whisper's `initial_prompt` (prevention), and a
   `corrections` find-and-replace pass (`apply_vocabulary()`) fixes stubborn

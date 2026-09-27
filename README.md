@@ -16,7 +16,8 @@ wherever your cursor is: an email, a chat, a document, a code editor, a browser.
 - **Free with one free key.** No subscription and no account with us: you bring your own
   key from Groq, whose free tier covers everyday dictation.
 - **Private.** No sign-up, no tracking. Your history stays on your PC.
-- **Knows your words.** Teach it names and jargon in the Dictionary.
+- **Learns your words.** Fix a word once and Scribe spells it right from then on; names
+  you say often are learned too. No list to keep up with.
 
 ## Install (about 3 minutes)
 
@@ -79,9 +80,10 @@ It follows Windows' light or dark mode, or pick one in **Settings → Appearance
   it (**Show what you said** shows your own words). Below: today, the last 30 days and
   your recent dictations — click one to copy it.
 - **Insights** — a quiet report on how you dictate: speaking pace, how fast text
-  appears, how often polish helps, the hours and apps you dictate in, and the words you
-  use most. Built only from your own history, on your PC.
-- **Dictionary** — your names and jargon, plus suggestions from what you say often.
+  appears, how often polish helps, the hours and apps you dictate in, the words Scribe
+  learned for you, and the words you use most. Built only from your own history, on your PC.
+- **Dictionary** — the words Scribe learned for you (remove any with one click), plus
+  anything you'd like to add by hand.
 - **Settings** — everything Scribe can do, including your keys, AI polish and updates.
 
 <img alt="Insights: speaking pace, time to text, how often polish helps, when you dictate" src="docs/images/insights-light.png" width="720">
@@ -118,11 +120,26 @@ Choose **Light** (punctuation, capitals and the "um"s only — every other word 
 **Full** (also smooths rambling) in **Settings → Cloud → Polish style**. Takes of three
 words or fewer are left alone, and your Dictionary always has the last word.
 
-## Your Dictionary
+## Your Dictionary (it fills itself)
 
-Teach Scribe the words it should know — names, products, jargon. On the **Dictionary**
-page you can add words, add corrections ("cal she" → "Kalshi") and accept suggestions
-drawn from what you say often. Changes apply from your next dictation.
+Scribe learns your names and jargon by itself, so there's nothing to keep up with:
+
+- **Fix a word once.** If Scribe types "cal she" and you correct it to "Kalshi" right
+  after, Scribe notices, learns it, and spells it right from then on — a small notice
+  tells you. This works in browsers (Gmail, ChatGPT, Slack on the web…), Office and most
+  chat apps; a few apps don't share their text (the VS Code editor, games, remote
+  desktops), and there Scribe simply doesn't learn.
+- **Say it often.** A name or acronym you say at least five times (Webull, SCHD) is added
+  to the words Scribe listens for — quietly. Everyday words and likely mishearings are
+  left out.
+
+The **Dictionary** page shows what Scribe learned and where each word came from. Remove
+one with ✕ and it's gone for good — Scribe won't learn it again. You can still add words
+or fixes by hand ("when Scribe types… write this instead"). Switch learning off in
+**Settings → Dictation → Learn my words automatically**. Changes apply from your next
+dictation.
+
+<img alt="The Dictionary: words Scribe learned for you, where each came from, one click to remove" src="docs/images/dictionary-light.png" width="720">
 
 ## Updates
 
@@ -142,6 +159,9 @@ settings and keys are never touched by an update.
 - With AI polish on, the **text** of each dictation is sent to Groq to be tidied.
 - Once a day Scribe asks **GitHub** for the latest version number (switch it off in
   **Settings → About**; with *On this PC* it starts switched off).
+- To learn from your fixes, Scribe reads the **text box it just typed into** — only that
+  box, only for a minute, only on your PC — and saves nothing but the corrected word.
+  Password boxes are never read. Switch it off in **Settings → Dictation**.
 - Your **keys** are stored by Windows (Credential Manager), encrypted with your sign-in.
 - Your **history, settings and Dictionary** stay on your PC, in `%APPDATA%\Scribe`.
 
@@ -153,7 +173,7 @@ Everything Scribe stores is in **`%APPDATA%\Scribe`** (right-click the tray icon
 | File | What |
 |---|---|
 | `config.json` | Your settings (your API keys are **not** here) |
-| `vocabulary.json` | Your Dictionary |
+| `vocabulary.json` | Your Dictionary — including the words Scribe learned, and how |
 | `dictation_log.jsonl` | Your dictation history, for the dashboard |
 | `cloud_usage.jsonl` | Cloud usage, for the usage meters in Settings |
 | `error_log.txt` | Errors and notices, if any |

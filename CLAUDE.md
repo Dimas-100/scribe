@@ -79,7 +79,9 @@ holds standalone `*_test.py` scripts, run directly from the project root
   it), `overlay_test`, `keystore_test` (one real Credential Manager
   round-trip on a throwaway name), `instance_test`, `autostart_test`
   (throwaway registry keys), `model_manager_test`, `model_flow_test`,
-  `first_run_test`, `welcome_test` (its one real-vault test points EVERY service at
+  `first_run_test`, `learning_test`, `fix_watch_test` (a scripted fake reader),
+  `uia_text_test` (starts a real Reader; asks only about a window that doesn't exist),
+  `learning_flow_test`, `welcome_test` (its one real-vault test points EVERY service at
   `Scribe-test/...` names, and a guard refuses any other read, write or delete),
   `elevenlabs_stream_test` (a fake ElevenLabs server on 127.0.0.1),
   `streaming_flow_test`, `polish_test`, `polish_flow_test` (fake Groq
@@ -101,7 +103,8 @@ holds standalone `*_test.py` scripts, run directly from the project root
   Credential Manager) and prints release->text time (`--usage` measures credits
   per hour; needs the key's User -> Read permission); `polish_probe.py` times
   the real AI polish on synthetic dictations (Groq key from Credential
-  Manager).
+  Manager); `uia_probe.py` reads the text box you click into (can Scribe
+  learn fixes in that app?).
 
 Troubleshooting: start Scribe with `SCRIBE_SAVE_TAKES=1` and every take is
 kept as `debug-takes\<time>.wav` + `.json` (captured vs held seconds, input
@@ -139,10 +142,11 @@ and `poll_updates` every 1 s (every 5 s while hidden). `dashboard_test`
 checks that every id the script looks up exists in the markup and, when
 Node is installed, that the page's scripts parse. History is read through
 `dashboard.HISTORY`, an incremental cache (new lines only; a rewritten file -
-new id, shrunk, or changed tail bytes - is re-read in full) that also keeps
-the suggestion index. `common_words.py` is the word list behind the
-dashboard's vocabulary suggestions (a word Capitalized in most of its
-mid-sentence uses counts as a name and bypasses it). Small shared modules sit under both processes:
+new id, shrunk, or changed tail bytes - is re-read in full). Polls also
+carry `vocab` whenever vocabulary.json changed (a word the app learned while
+the page is open). `common_words.py` is the everyday-word list behind
+learning.py (a word Capitalized in most of its mid-sentence uses counts as a
+name and bypasses it). Small shared modules sit under both processes:
 
 - `storage.py` — where user data lives (`%APPDATA%\Scribe`, or
   `SCRIBE_DATA_DIR` if set) and how it is saved: atomic writes (temp file +
@@ -221,6 +225,23 @@ mid-sentence uses counts as a name and bypasses it). Small shared modules sit un
   raises: available / current / offline / error) and `install()` (the
   updater - see Distribution above; `apply_zip()` writes only `Scribe/...`
   files, never into venv/.tools/.git or outside the folder).
+- `learning.py` — the Dictionary that fills itself, pure functions:
+  `SuggestionIndex` (word counts and spellings over the history),
+  `auto_terms()` (names said >= 5 times, >= 60% Capitalized mid-sentence or an
+  acronym, not COMMON_WORDS, one spelling >= 80%, not a variant - difflib
+  >= 0.5 - of a known word or of a candidate said 2x as often), `find_fixes()`
+  (1-3 words -> 1-3 words, alike, no digits, not grammar unless it joins words
+  "text-to-speech", capitals-only only for rare words, <= 3 changes),
+  `find_region()`, `learn()` / `forget()` (forget dismisses: never learned
+  again).
+- `fix_watch.py` (app only) — `FixWatcher`: ONE thread that reads back the
+  box a dictation was typed into (0.25 s settle, every 2 s, up to 60 s; a new
+  dictation or an emptied box ends it after a last read) and hands each fix
+  to `on_fix`. A Reader is injected (`uia_text.Reader` in the app).
+- `uia_text.py` (app only) — Windows UI Automation via `comtypes`:
+  `focused_box(hwnd)` (same process, never a password box, TextPattern or
+  ValuePattern), `read(box)` (<= 20,000 chars, never raises). Created on the
+  watcher's thread (COM).
 - `model_manager.py` (app only) — the local Whisper model on a background
   thread: find in cache (no network) / download with byte progress (plain
   HTTPS, not Xet) / load / swap; states waiting, loading, downloading, ready,
@@ -266,6 +287,13 @@ The main threads:
   starting Scribe (setup.bat / the updater wait on it).
 - **Update watcher** (`_update_watcher`) — 90 s after start, then daily:
   `_check_for_update()` notifies once per new version.
+- **Fix watcher** (`fix_watcher`, fix_watch.py) — `_deliver_job()` hands it
+  `(hwnd, output)` after a verified, logged delivery (a queue put, outside
+  `deliver_lock`); its fixes go to `_learn_word()` (under `vocab_lock`: read
+  the file, `learning.learn`, save, `load_vocabulary()`, reset the Whisper
+  prompt cache, one `learned:<word>` notice). `_learn_from_dictation()` (the
+  worker thread) keeps `_learning_index` - built from the history on first
+  use - and adds `auto_terms()` quietly. `LEARN_WORDS` switches both.
 - **ElevenLabs session threads** (one per streamed dictation, in
   `elevenlabs_stream`) — `start_recording()` opens one when ElevenLabs is the
   usable service (`_eleven_configured()` + not paused, or the only backend);
@@ -370,8 +398,13 @@ test them in isolation. New post-processing belongs in this chain.
   rather than returning "" when nothing can transcribe.
 - **Custom vocabulary:** `vocabulary.json` (optional, personal, gitignored —
   `vocabulary.example.json` is the committed template) holds `terms` (fed to
-  Whisper's prompt via `build_transcribe_prompt()`) and `corrections` (the
-  find-and-replace map for `apply_vocabulary()`). Loaded at startup by
+  Whisper's prompt via `build_transcribe_prompt()`), `corrections` (the
+  find-and-replace map for `apply_vocabulary()`), `dismissed` (never learned
+  again) and `learned` ({word: {from: fix|said, at, wrong?}} - what Scribe
+  added by itself). `_ranked_terms()` = learned (oldest first) then yours
+  (newest last): ElevenLabs' 50 keyterms, polish and the Whisper prompt take
+  the newest first, so learned words never push yours out.
+  `_apply_vocabulary_counted()` gives the history its `fixed` count. Loaded at startup by
   `load_vocabulary()` and again by `reload_config()` when the dashboard
   saves, so Dictionary-page edits apply on the next dictation.
 - **Undo:** `_deliver_job()` saves the delivered text in `last_output` with
