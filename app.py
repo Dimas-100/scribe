@@ -121,9 +121,11 @@ except ImportError as _missing:
 
 # Scribe's own shared modules (also used by the dashboard): where your data
 # lives and how it's saved safely, and which microphones exist.
+import brand
 import devices
 import elevenlabs_stream
 import fix_watch
+import indicator
 import keystore
 import learning
 import model_manager
@@ -787,13 +789,11 @@ _stream_session = None
 tray_icon = None         # the system-tray icon object (created in main())
 listener = None          # the global keyboard listener (created in main())
 root = None              # the hidden Tkinter root window (created in main())
-overlay = None           # the floating on-screen status pill
-overlay_canvas = None    # the Canvas inside the overlay - we draw on this
-overlay_state = "idle"   # "idle" | "recording" | "transcribing" - drives the animation
-overlay_anim_phase = 0   # ever-incrementing tick counter; drives the sine waves
-overlay_anim_job = None  # root.after() handle for the animation loop, so we can cancel
+overlay = None           # the indicator's window (indicator.LayeredWindow), or None
+overlay_state = "idle"   # "idle" | "recording" | "transcribing" - what it shows
+overlay_anim_job = None  # root.after() handle of its frame loop; None = parked
 # Today's Groq usage state, refreshed every QUOTA_TICK_MS on the main
-# thread. quota_state drives the idle pill's color; quota_worst_ratio
+# thread. quota_state colours the indicator's caret; quota_worst_ratio
 # is the 0.0..1.0+ fraction of the worst daily counter, used in the
 # tray tooltip ("Scribe - ready · 78% of daily Groq quota used").
 quota_state = "ok"           # "ok" | "warn" | "danger"
@@ -814,10 +814,6 @@ ui_queue = queue.Queue()
 # of re-joining 35 terms on every transcription (including each speculative
 # cycle). Reset to None to force a rebuild if the vocabulary ever reloads.
 _TRANSCRIBE_PROMPT_CACHE = None
-
-# Last (x, y) the overlay window was positioned at, so _reposition loops can
-# skip a redundant geometry set when nothing moved.
-_overlay_last_xy = None
 
 # Date cloud_usage.jsonl was last trimmed, so the daily trim runs once a day.
 _last_cloud_trim_date = None
@@ -962,61 +958,80 @@ _show_notices(STARTUP_NOTICES)
 #  TRAY ICON  -  the visible state indicator when running in the background.
 # =============================================================================
 
-def make_icon(color):
-    """
-    Draw the Scribe icon, Wispr-Flow style: a soft squircle in the given
-    state color with four white equalizer bars rising and falling at the
-    center - the visual shorthand for "voice / audio." The squircle (a
-    rounded square with a generous radius) reads more like a modern app
-    icon than the old plain circle. Drawn at 256 px so it stays crisp
-    when Windows downsamples it for the taskbar and tray.
-    """
-    size = 256
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))  # transparent
-    draw = ImageDraw.Draw(image)
-
-    # Squircle background: rounded rectangle with a large corner radius.
-    draw.rounded_rectangle(
-        (12, 12, size - 12, size - 12), radius=56, fill=color,
-    )
-
-    # Four equalizer bars of varying heights - the same silhouette as the
-    # "lll Flow" wordmark in Wispr Flow. Each bar is a white rounded
-    # rectangle; varying heights with the tallest in the middle suggest
-    # a live audio signal.
-    bar_w = 22
-    bar_gap = 18
-    heights = [78, 132, 102, 58]
-    total_w = len(heights) * bar_w + (len(heights) - 1) * bar_gap
-    x_start = (size - total_w) / 2
-    cy = size / 2
-    radius = bar_w / 2
-    for i, h in enumerate(heights):
-        x = x_start + i * (bar_w + bar_gap)
-        y_top = cy - h / 2
-        y_bot = cy + h / 2
-        draw.rounded_rectangle(
-            (x, y_top, x + bar_w, y_bot), radius=radius, fill="white",
-        )
-    return image
+# The tray picture is Scribe's mark (brand.py) without its tile - the way
+# Windows' own tray icons look: white on a dark taskbar, ink on a light one.
+# While you talk its caret turns red; while Scribe works the mark dims.
+TRAY_LIGHT = brand.taskbar_is_light()
+TRAY_THEME_MS = 3000        # how often the main thread checks the taskbar's theme
 
 
-# Deep teal idle color, matching the dashboard accent.
-ICON_IDLE = make_icon((30, 95, 74))        # deep teal - ready
-ICON_RECORDING = make_icon((214, 69, 69))  # red       - recording
-ICON_BUSY = make_icon((209, 137, 54))      # amber     - transcribing
+def _tray_images(light):
+    return {state: brand.tray_icon(state, light)
+            for state in ("idle", "recording", "transcribing")}
 
-# Save the blue (idle) icon as a .ico file the first time, so the dashboard
-# window and the launch shortcut have a proper icon. An .ico bundles several
-# resolutions in one file; Windows picks whichever size it needs.
+
+TRAY_IMAGES = _tray_images(TRAY_LIGHT)
+
+
+def _tray_image(state):
+    """The tray picture for `state`, in the taskbar's current theme."""
+    return TRAY_IMAGES.get(state, TRAY_IMAGES["idle"])
+
+
+def _tray_theme_tick():
+    """Main thread, every few seconds: if Windows switched between a light
+    and a dark taskbar, redraw the tray mark to match."""
+    global TRAY_LIGHT, TRAY_IMAGES
+    try:
+        light = brand.taskbar_is_light()
+        if light != TRAY_LIGHT:
+            TRAY_LIGHT, TRAY_IMAGES = light, _tray_images(light)
+            _refresh_status()          # re-applies the picture for the current state
+    except Exception as exc:
+        _write_error_log("tray theme", exc)
+    try:
+        root.after(TRAY_THEME_MS, _tray_theme_tick)
+    except Exception:
+        pass                           # Tk is shutting down
+
+
+class _TrayIcon(pystray.Icon):
+    """pystray's tray icon, made crisp. pystray loads its picture at the big
+    icon size and lets Windows shrink it into the tray (a soft, blurry mark);
+    this loads it at the tray's own size, from the frame brand.tray_icon()
+    drew for exactly that size. Any problem: pystray's own way."""
+
+    def _assert_icon_handle(self):
+        if getattr(self, "_icon_handle", None):
+            return
+        frames = getattr(self.icon, "info", {}).get("frames")
+        if frames and sys.platform == "win32":
+            try:
+                import tempfile
+                from pystray._util import win32 as pywin32
+                size = ctypes.windll.user32.GetSystemMetrics(49)     # SM_CXSMICON
+                fd, path = tempfile.mkstemp(suffix=".ico")
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(brand.ico_bytes(self.icon))
+                    self._icon_handle = pywin32.LoadImage(
+                        None, path, pywin32.IMAGE_ICON, size, size, pywin32.LR_LOADFROMFILE)
+                finally:
+                    os.remove(path)
+                return
+            except Exception as exc:
+                _write_error_log("tray icon", exc)
+        super()._assert_icon_handle()
+
+
+# scribe.ico (the app icon at every size, each drawn for itself) ships with
+# Scribe; it is only written here if it's missing - the dashboard window and
+# the shortcuts use it.
 if not os.path.exists(ICO_FILE):
     try:
-        ICON_IDLE.save(
-            ICO_FILE, format="ICO",
-            sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
-        )
+        brand.write_ico(ICO_FILE)
     except OSError:
-        pass   # read-only code folder - the .ico ships with the repo anyway
+        pass   # a read-only folder: Windows falls back to a generic icon
 
 
 def set_state(image, title):
@@ -1069,14 +1084,14 @@ def _idle_tooltip(snap, usable, quota, ratio, pending=False):
 
 
 def _apply_status(state):
-    """Main thread only: show `state` on the tray icon and the overlay pill."""
+    """Main thread only: show `state` on the tray icon and the indicator."""
     if state == "recording":
-        set_state(ICON_RECORDING, "Scribe - recording...")
+        set_state(_tray_image("recording"), "Scribe - recording...")
     elif state == "transcribing":
-        set_state(ICON_BUSY, "Scribe - transcribing...")
+        set_state(_tray_image("transcribing"), "Scribe - transcribing...")
     else:  # "idle"
         usable = _cloud_configured() or _local_model() is not None
-        set_state(ICON_IDLE, _idle_tooltip(models.snapshot(), usable,
+        set_state(_tray_image("idle"), _idle_tooltip(models.snapshot(), usable,
                                            quota_state, quota_worst_ratio,
                                            pending=setup_pending))
     update_overlay(state)
@@ -4036,32 +4051,21 @@ def _device_watcher():
 
 
 # =============================================================================
-#  STATUS OVERLAY  -  the always-visible pill at bottom-center of the screen.
-#  It is a Tkinter window, so it is only ever touched on the main thread.
+#  THE INDICATOR  -  the capsule at the bottom of the screen while you dictate.
 #
-#  Design (Wispr Flow-style):
-#    - Idle           -> a small dark COLLAPSED pill, always on screen, as a
-#                        quiet "Scribe is here" indicator. No animation.
-#    - Recording      -> the pill EXPANDS upward into the full-size shape
-#                        and shows a live scrolling waveform inside (white),
-#                        driven by the actual mic level.
-#    - Transcribing   -> same expanded shape, a traveling wave through the
-#                        same bars (grey) to signal continuous processing.
-#  Transitions between the two sizes are eased so the pill feels alive,
-#  not jumpy.
+#  indicator.py draws it and moves it; this part decides WHEN and WHERE.
+#  Press the hotkey: it opens around a text caret. Talk: a wave flows into
+#  the caret, as tall as your voice. Let go: the wave settles into a line and
+#  a soft light glides along it while Scribe works. The text lands: it folds
+#  up and fades. Idle, nothing is on screen and nothing runs.
 #
-#  Tk has no per-pixel transparency, so we fake rounded corners with the
-#  Windows `transparentcolor` trick: one specific color in the window becomes
-#  fully see-through. We use PURE BLACK as the chromakey and render the pill
-#  via PIL with supersampling + LANCZOS downsampling, so the rounded edges
-#  are anti-aliased. Only EXACTLY-black pixels disappear; the AA fringe at
-#  the pill's edge fades from pill-color toward (but not all the way to)
-#  black, so it stays visible as a subtle dark glow instead of producing a
-#  garish purple halo - the artefact you would otherwise get when AA edges
-#  blend against a magenta key color.
+#  It is a window, so it lives on the MAIN thread: update_overlay() (from
+#  _apply_status) and the frame loop _indicator_tick() - about 60 frames a
+#  second while it's visible, none while it's hidden. The window is a Windows
+#  "layered" window with a real alpha channel: smooth edges, a soft shadow
+#  and true fades over any background (indicator.LayeredWindow).
 # =============================================================================
 
-# --- Overlay look and feel. Tweak here, not inline. ---
 # --- Display scaling. Without this, Windows treats Scribe as a 96-DPI app
 #     and bitmap-stretches the overlay at 125-200% scaling (blurry). Declaring
 #     "system DPI aware" makes Windows hand us real pixels - so every size
@@ -4089,57 +4093,14 @@ def _px(value, scale=None):
     """A size in 100%-scaling pixels -> real pixels at this display's scale."""
     return max(1, int(round(value * (UI_SCALE if scale is None else scale))))
 
+INDICATOR_FRAME_MS = 1000 / 60   # ~60 frames a second while it's visible
+INDICATOR_GIVE_UP = 60           # this many bad frames IN A ROW: switch it off
+INDICATOR_LOG_EVERY = 60.0       # a failing frame is logged at most once a minute
 
-OVERLAY_W       = _px(56)          # ACTIVE pill width  (recording/transcribing)
-OVERLAY_H       = _px(18)          # ACTIVE pill height (recording/transcribing)
-OVERLAY_W_IDLE  = _px(30)          # collapsed pill width  (idle)
-OVERLAY_H_IDLE  = _px(4)           # collapsed pill height (idle) - thin bar
-
-# Supersample factor for the PIL render. The WHOLE overlay - the pill AND the
-# waveform bars - is drawn this many times larger, then LANCZOS-downsampled,
-# so every edge is anti-aliased. (The bars used to be jagged Tk-canvas
-# rectangles with no AA - rendering them in PIL is what makes the waveform
-# look crisp instead of pixelated.)
-OVERLAY_SS = 5
-# Waveform bar geometry, in logical px (pre-supersample).
-OVERLAY_BAR_W   = _px(2)           # bar width
-OVERLAY_BAR_GAP = _px(2)           # gap between bars
-OVERLAY_BAR_PAD = _px(6)           # vertical padding: tallest bar = pill_height - this
-OVERLAY_BAR_MIN_H = _px(2)         # shortest bar, so silence still shows a thin line
-OVERLAY_BAR_MIN_PILL_H = _px(10)   # only draw bars once the pill has expanded past this
-# The pill floats over every app, in any theme, so it follows none: a
-# neutral near-black capsule with a hairline edge - like a Windows flyout.
-OVERLAY_FILL    = "#1c1c1f"   # the visible pill color (never pure black: that's the key)
-OVERLAY_EDGE    = "#3a3a40"   # its 1 px hairline, so it reads on dark backgrounds too
-OVERLAY_CHROMAKEY = "#000000" # pure black - exactly-black pixels are made
-                              # transparent; the pill's AA fringe fades
-                              # toward black but never reaches it, so it
-                              # shows as a soft dark glow around the pill.
-OVERLAY_ALPHA   = 0.94        # very slight translucency over the pill itself
-OVERLAY_BOTTOM_PAD = _px(24)       # distance from screen bottom (pill BOTTOM edge)
-OVERLAY_TICK_MS = 50          # animation tick interval; ~20 fps is plenty smooth
-
-# Eased size transition: each tick, current dimensions move this fraction
-# of the way toward the target. 0.30 lands in ~6 frames (~300ms), which
-# feels responsive without snapping.
-OVERLAY_LERP = 0.30
-
-# Waveform colors for the overlay's active states: plain WHITE bars follow
-# your voice while recording; soft GREY bars pulse while it transcribes - the
-# brightness alone tells the two apart, with no colour to clash with whatever
-# is on screen. (The tray icon still goes red while recording, so the
-# universal "rec" cue is never lost.)
-WAVE_RECORDING    = "#f4f4f5"   # recording    - white (the live voice)
-WAVE_TRANSCRIBING = "#8e8e96"   # transcribing - soft grey "working" pulse
-
-# Quota-nudge tints for the IDLE pill - applied when today's Groq free-
-# tier usage crosses 70% / 90% of either daily counter. Muted on purpose
-# (a gentle presence, not a panic) but clearly warmer / redder than the
-# neutral fill, or the nudge would be invisible on the thin idle bar.
-# Active states (recording, transcribing) keep the neutral fill, so the
-# dictation flow stays unambiguous.
-OVERLAY_FILL_WARN   = "#44361a"   # 70-90% of a daily quota used (muted amber)
-OVERLAY_FILL_DANGER = "#55252e"   # 90%+ of a daily quota used (muted rose)
+indicator_motion = indicator.Motion()   # what it looks like now (main thread)
+_indicator_xy = None                    # where it opened: the monitor you're on
+_indicator_failures = 0                 # bad frames in a row
+_indicator_logged_at = -1e9             # time.monotonic() of the last logged one
 
 # Groq whisper free-tier daily limits. Duplicated from dashboard.py
 # (the two processes can't share state) and hard-coded because they
@@ -4160,161 +4121,17 @@ QUOTA_TICK_MS = 5000
 _quota_cache_sig = None
 _quota_cache_val = ("ok", 0.0)
 
-# Current rendered pill dimensions. Updated by the tick loop as it eases
-# toward the target size for the current state. Module-level so the draw
-# helpers can read them without an argument plumbing.
-_pill_w = float(OVERLAY_W_IDLE)
-_pill_h = float(OVERLAY_H_IDLE)
-
-# The live-waveform buffer. Each tick we push the latest smoothed mic
-# level onto the right edge and drop the oldest off the left, so the
-# bars appear to scroll right -> left while the user speaks. Used only
-# by the recording-state draw helper; transcribing computes its bar
-# heights from a traveling sine wave instead.
-OVERLAY_BARS = 12
-overlay_bar_levels = [0.0] * OVERLAY_BARS
-
-# Tk garbage-collects PhotoImage objects the moment their last Python
-# reference disappears - even if they are still attached to a canvas
-# item. We keep the latest pill image here so the canvas's create_image
-# entry has something to point at across ticks.
-_pill_image_tk = None
-# (rounded w, rounded h, fill_color) the current pill image was rendered for.
-# Lets _draw_pill skip a re-render when nothing about the pill changed.
-_pill_cache_key = None
-
-
-def _state_target():
-    """Target (w, h) for the pill in the current overlay state."""
-    if overlay_state == "idle":
-        return OVERLAY_W_IDLE, OVERLAY_H_IDLE
-    return OVERLAY_W, OVERLAY_H
-
 
 def build_overlay():
-    """Create the always-on-top status pill at its collapsed idle size,
-    and leave it visible. From here on the tick loop handles all visual
-    state changes; the window itself is never withdrawn."""
-    global overlay, overlay_canvas
-    overlay = tk.Toplevel(root)
-    overlay.overrideredirect(True)        # no title bar, no borders
-    overlay.attributes("-topmost", True)  # always float above other windows
-    overlay.attributes("-alpha", OVERLAY_ALPHA)
-    # Chromakey: any pixel painted in OVERLAY_CHROMAKEY becomes fully
-    # transparent on Windows. That hides the canvas area outside the
-    # pill so the idle pill reads as a small floating shape, not a square.
+    """Make the indicator's window - hidden until you dictate. If Windows
+    won't make it, Scribe runs without it (the tray icon still shows what
+    it's doing) and the error log says why."""
+    global overlay
     try:
-        overlay.wm_attributes("-transparentcolor", OVERLAY_CHROMAKEY)
-    except tk.TclError:
-        pass
-    overlay.configure(bg=OVERLAY_CHROMAKEY)
-    # The canvas is sized to fit the LARGER active pill; the smaller idle
-    # pill is drawn centered horizontally and bottom-aligned within it,
-    # so transitions feel like the pill growing UP rather than re-centering.
-    overlay_canvas = tk.Canvas(
-        overlay,
-        width=OVERLAY_W, height=OVERLAY_H,
-        bg=OVERLAY_CHROMAKEY,
-        highlightthickness=0, bd=0,
-    )
-    overlay_canvas.pack()
-    position_overlay()
-    _draw_pill(_pill_w, _pill_h)          # draw the initial idle pill
-    overlay.deiconify()                   # visible from the start
-    # Keep the pill anchored to the work area for the rest of the
-    # process's life - the taskbar can move or auto-hide after startup,
-    # and position_overlay() is otherwise never re-run.
-    root.after(OVERLAY_REPOSITION_MS, _reposition_overlay_loop)
-
-
-def _draw_pill(w, h, bars=None, bar_color=None):
-    """Put the overlay on its canvas: the pill (rendered by _render_pill())
-    in the right fill for the state and quota.
-
-    Memoized while idle (no bars), so a settled pill isn't re-rendered every
-    tick; always re-rendered while the waveform animates (bars change each
-    frame, so there is nothing to cache)."""
-    global _pill_image_tk, _pill_cache_key
-    if h < 1 or w < 1:
-        return
-
-    if overlay_state == "idle" and quota_state == "danger":
-        fill_color = OVERLAY_FILL_DANGER
-    elif overlay_state == "idle" and quota_state == "warn":
-        fill_color = OVERLAY_FILL_WARN
-    else:
-        fill_color = OVERLAY_FILL
-
-    if bars is None:
-        key = (int(round(w)), int(round(h)), fill_color)
-        if key == _pill_cache_key and overlay_canvas.find_withtag("pill"):
-            return
-        _pill_cache_key = key
-    else:
-        _pill_cache_key = None        # animating - force the next idle frame to redraw
-
-    overlay_canvas.delete("pill")
-    _pill_image_tk = ImageTk.PhotoImage(_render_pill(w, h, fill_color, bars, bar_color))
-    overlay_canvas.create_image(
-        0, 0, image=_pill_image_tk, anchor="nw", tags="pill",
-    )
-
-
-def _render_pill(w, h, fill_color, bars=None, bar_color=None):
-    """Render the whole overlay - the rounded pill (w x h, bottom-aligned so it
-    appears to grow UP from a fixed baseline), plus the waveform bars when
-    `bars` (a list of 0..1 levels) is supplied - as ONE supersampled PIL
-    image, downsampled with LANCZOS for smooth anti-aliased edges. Returns
-    the OVERLAY_W x OVERLAY_H image. Pure (no Tk), so tests can look at it.
-
-    Drawing the bars here in PIL (rather than as Tk-canvas rectangles, which
-    have NO anti-aliasing) is what keeps the waveform crisp instead of jagged.
-    No glow, no colour: a calm grey capsule that sits well over any app."""
-    SS = OVERLAY_SS
-    iw, ih = OVERLAY_W * SS, OVERLAY_H * SS
-    # Black background = chromakey, so anything outside the rounded shape
-    # disappears entirely. LANCZOS averaging across the edges produces
-    # near-black (but not exactly black) pixels, the soft visible AA fringe.
-    img = Image.new("RGB", (iw, ih), OVERLAY_CHROMAKEY)
-    d = ImageDraw.Draw(img)
-
-    sw = max(1, int(round(w * SS)))
-    sh = max(1, int(round(h * SS)))
-    radius = sh / 2
-    cx = iw / 2                                  # horizontal center
-    bottom = ih                                  # pill bottom = image bottom
-    top = bottom - sh
-    pill_box = (cx - sw / 2, top, cx + sw / 2 - 1, bottom - 1)
-    # The hairline is one real pixel wide (SS supersampled pixels), drawn as
-    # the shape's own outline so it follows the rounded ends exactly. Only
-    # on the expanded pill: on the 4 px idle bar it would leave almost no
-    # room for the fill - and the quota tint lives in the fill.
-    edge = OVERLAY_EDGE if h >= OVERLAY_BAR_MIN_PILL_H else None
-    d.rounded_rectangle(pill_box, radius=radius, fill=fill_color,
-                        outline=edge, width=SS if edge else 0)
-
-    # Waveform bars - only once the pill has expanded enough to contain them.
-    if bars and h >= OVERLAY_BAR_MIN_PILL_H:
-        n = len(bars)
-        bw = OVERLAY_BAR_W * SS
-        gap = OVERLAY_BAR_GAP * SS
-        block_w = n * bw + (n - 1) * gap
-        bx = cx - block_w / 2
-        bcy = bottom - sh / 2                     # vertical center of the pill
-        max_h = max(OVERLAY_BAR_MIN_H * SS, (h - OVERLAY_BAR_PAD) * SS)
-        min_h = OVERLAY_BAR_MIN_H * SS
-        brad = bw / 2
-        boxes = []
-        for i, level in enumerate(bars):
-            lvl = 0.0 if level < 0 else 1.0 if level > 1 else level
-            bh = min_h + (max_h - min_h) * lvl
-            x = bx + i * (bw + gap)
-            boxes.append((x, bcy - bh / 2, x + bw, bcy + bh / 2))
-
-        for box in boxes:
-            d.rounded_rectangle(box, radius=brad, fill=bar_color)
-
-    return img.resize((OVERLAY_W, OVERLAY_H), Image.LANCZOS)
+        overlay = indicator.LayeredWindow(*indicator.window_size(UI_SCALE))
+    except Exception as exc:
+        overlay = None
+        _write_error_log("indicator window", exc)
 
 
 def _work_area_bottom():
@@ -4334,33 +4151,27 @@ def _work_area_bottom():
             return int(rect[3])     # rect.bottom
     except Exception:
         pass
-    return overlay.winfo_screenheight()
+    return root.winfo_screenheight()
 
 
-def position_overlay():
-    """Center the overlay horizontally and place its BOTTOM at a fixed
-    distance ABOVE the Windows taskbar. We anchor by the bottom so the
-    pill appears to grow upward when it expands."""
-    global _overlay_last_xy
-    screen_w = overlay.winfo_screenwidth()
-    work_bottom = _work_area_bottom()
-    x = (screen_w - OVERLAY_W) // 2
-    # Window y so the canvas (and pill) BOTTOM sits OVERLAY_BOTTOM_PAD
-    # pixels above the taskbar's top edge. The canvas height is OVERLAY_H.
-    y = work_bottom - OVERLAY_H - OVERLAY_BOTTOM_PAD
-    # The reposition loop calls this every second; skip the geometry set (and
-    # the update_idletasks flush) when the target hasn't actually moved.
-    if (x, y) == _overlay_last_xy:
-        return
-    _overlay_last_xy = (x, y)
-    overlay.update_idletasks()
-    overlay.geometry(f"+{x}+{y}")
+
+def _indicator_position():
+    """Where the window goes: the monitor you're working on (the window in
+    front), centred, just above its taskbar."""
+    area = indicator.work_area()
+    if area is None:
+        area = (0, 0, root.winfo_screenwidth(), _work_area_bottom())
+    return indicator.place(area, UI_SCALE)
 
 
-# How often (ms) to re-run position_overlay(). 1 Hz is enough - the
-# taskbar's geometry only changes on user actions (auto-hide animations,
-# moving the taskbar, plugging a monitor) and a ~1s lag is invisible.
-OVERLAY_REPOSITION_MS = 1000
+def _indicator_caret():
+    """The caret's colour: white - or amber, then rose, near Groq's daily
+    limit (the tray tooltip gives the percentage)."""
+    if quota_state == "danger":
+        return indicator.CARET_DANGER
+    if quota_state == "warn":
+        return indicator.CARET_WARN
+    return indicator.CARET
 
 
 def _compute_quota_state():
@@ -4430,10 +4241,11 @@ def _compute_quota_state():
     return result
 
 
+
 def _quota_tick():
     """Periodic refresh of the quota state on the main thread. When the
-    state changes, re-tint the idle overlay and re-apply the tray
-    tooltip so the user sees a 'getting close' nudge before Groq
+    state changes, re-apply the tray tooltip (the indicator's caret reads
+    quota_state on every frame) so the user sees a 'getting close' nudge before Groq
     actually 429s. Always re-arms itself so a transient file-read
     error can't kill the loop."""
     global quota_state, quota_worst_ratio, _last_cloud_trim_date
@@ -4455,15 +4267,6 @@ def _quota_tick():
     quota_state = new_state
     quota_worst_ratio = ratio
     if changed:
-        # The tick loop is parked while idle, so a quota change won't
-        # naturally redraw - poke the pill ourselves. For active
-        # states the animation is already running and will pick up
-        # the (unchanged) idle color the next time it settles.
-        if overlay is not None and overlay_state == "idle":
-            try:
-                _draw_pill(_pill_w, _pill_h)
-            except Exception:
-                pass
         # Refresh the tray tooltip so the percentage appears /
         # disappears in the hover text. (_refresh_status, not the last
         # overlay state: that could be stale and re-show "transcribing".)
@@ -4471,147 +4274,87 @@ def _quota_tick():
     root.after(QUOTA_TICK_MS, _quota_tick)
 
 
-def _reposition_overlay_loop():
-    """Re-anchor the overlay to the current work area on a slow tick.
-    position_overlay() is otherwise called only at startup, so if the
-    taskbar auto-hides, moves, or the primary monitor changes after
-    that, the pill ends up at the wrong y - sometimes hidden behind the
-    taskbar. Polling is cheap (one Win32 call + one geometry set per
-    second) and handles every cause uniformly without subscribing to
-    Windows messages."""
-    if overlay is None:
-        return
-    try:
-        position_overlay()
-    except Exception:
-        # Never let a transient Tk/Win32 hiccup kill the loop - the
-        # overlay would then stay frozen at whatever the last good
-        # position was, which is the bug we are trying to avoid.
-        pass
-    root.after(OVERLAY_REPOSITION_MS, _reposition_overlay_loop)
-
-
-def _active_bar_levels():
-    """Return (levels, color) for the current active state - a list of 0..1
-    bar heights plus the waveform color - or (None, None) when idle. The
-    actual drawing happens in _draw_pill(), which renders these bars into the
-    supersampled PIL image for smooth, anti-aliased edges.
-
-    Recording advances the rolling live-waveform buffer by one fresh mic
-    sample, so the bars scroll right -> left as you speak. Transcribing
-    computes a traveling sine wave - a steady 'still working' pulse."""
-    if overlay_state == "recording":
-        # The 12x multiplier maps typical speech RMS (~0.05..0.15) into a
-        # comfortable mid-range; the 0.7 power curve compresses the dynamic
-        # range so quiet speech still shows and loud bursts don't clip wildly.
-        target = min(1.0, (current_audio_level * 12.0) ** 0.7)
-        overlay_bar_levels.pop(0)
-        overlay_bar_levels.append(target)
-        return list(overlay_bar_levels), WAVE_RECORDING
-    if overlay_state == "transcribing":
-        # Per-bar phase lag creates the traveling wave - each bar trails the
-        # one to its left. 0.25 sets the speed (~0.8 Hz at 20 fps); 0.45 the
-        # wavelength.
-        levels = [0.5 + 0.5 * math.sin(overlay_anim_phase * 0.25 - i * 0.45)
-                  for i in range(OVERLAY_BARS)]
-        return levels, WAVE_TRANSCRIBING
-    return None, None
-
 
 def _log_overlay_error(exc):
-    """Append an overlay-tick exception to the error log instead of letting
-    it vanish. Tk routes an exception raised inside an after() callback to
-    its default handler, which writes to stderr - and under pythonw there
-    is NO stderr, so the traceback is lost and the only visible symptom is
-    'the status pill froze and never moved again.' Writing it here leaves a
-    trail we can actually read. Best-effort: logging must never itself
-    raise, or it would defeat the self-healing it exists to support."""
-    _write_error_log("_overlay_tick", exc)
+    """Log a failed indicator frame - at most once a minute, since the next
+    frame (16 ms later) would likely fail the same way. Under pythonw there
+    is no stderr: without this line a stuck indicator would leave no trace.
+    Logging must never itself raise."""
+    global _indicator_logged_at
+    now = time.monotonic()
+    if now - _indicator_logged_at >= INDICATOR_LOG_EVERY:
+        _indicator_logged_at = now
+        _write_error_log("indicator frame", exc)
 
 
-def _overlay_tick():
-    """Animation heartbeat. Eases the pill toward the target size for the
-    current state, redraws the pill, and (if active) draws the inner
-    animation on top. The loop keeps running while we are still moving
-    toward an idle target; once we settle there, it stops to save CPU.
+def _stop_indicator():
+    """Park the frame loop and give the fine timer back."""
+    global overlay_anim_job
+    overlay_anim_job = None
+    indicator.fine_timer(False)
 
-    The whole body is wrapped in try/except for a reason that bit us once:
-    if any single frame raised - a transient Tk / PIL / Win32 hiccup while
-    drawing - the old code stopped here BEFORE re-arming the loop, AND left
-    overlay_anim_job pointing at the already-fired after id. That id is not
-    None, so update_overlay()'s "if overlay_anim_job is None: restart" check
-    then failed forever: the pill stuck at whatever size it had (usually the
-    collapsed idle bar) until Scribe was restarted, with the traceback lost
-    to pythonw's missing stderr. Now a bad frame is logged and we fall
-    through to re-arm, so the next tick simply tries again and the pill
-    heals itself."""
-    global overlay_anim_phase, overlay_anim_job, _pill_w, _pill_h
 
+def _indicator_tick():
+    """One frame: ask the motion what the capsule looks like now, draw it,
+    and come back in ~16 ms - or, once it has folded away, hide the window
+    and stop.
+
+    One bad frame (a Win32 or PIL hiccup) is logged and the next frame just
+    tries again: a hiccup must never leave the capsule frozen on screen.
+    Only a run of INDICATOR_GIVE_UP bad frames in a row - something truly
+    broken - switches the indicator off until Scribe restarts; dictation
+    carries on and the tray icon still shows the state."""
+    global overlay, _indicator_xy, _indicator_failures, overlay_anim_job
+    started = time.monotonic()
+    if overlay is None:
+        _stop_indicator()
+        return
     try:
-        target_w, target_h = _state_target()
-
-        # Snap if we are within a sub-pixel of the target (avoids endless
-        # micro-adjustments that never quite reach the integer).
-        if abs(target_w - _pill_w) < 0.5 and abs(target_h - _pill_h) < 0.5:
-            _pill_w = float(target_w)
-            _pill_h = float(target_h)
-        else:
-            _pill_w += (target_w - _pill_w) * OVERLAY_LERP
-            _pill_h += (target_h - _pill_h) * OVERLAY_LERP
-
-        # Render the pill AND the waveform bars together in one anti-aliased
-        # PIL image (the bars used to be jagged Tk-canvas rectangles).
-        bars, bar_color = _active_bar_levels()
-        _draw_pill(_pill_w, _pill_h, bars=bars, bar_color=bar_color)
-
-        overlay_anim_phase += 1
-
-        # Stop ticking only when we are idle AND have fully settled at the
-        # idle size. While transitioning to idle, the tick keeps going so we
-        # can animate the collapse smoothly.
-        settled = (_pill_w == target_w and _pill_h == target_h)
-        if overlay_state == "idle" and settled:
-            overlay_anim_job = None
+        indicator_motion.caret = _indicator_caret()
+        frame = indicator_motion.step(started, current_audio_level)
+        if frame is None:
+            overlay.hide()
+            _stop_indicator()
             return
+        if _indicator_xy is None:
+            _indicator_xy = _indicator_position()
+        overlay.show(indicator.render(frame, UI_SCALE), *_indicator_xy, frame.alpha)
+        _indicator_failures = 0
     except Exception as exc:
-        # One bad frame must never kill the loop (see docstring). Log it,
-        # then fall through to re-arm so the animation recovers next tick.
+        _indicator_failures += 1
         _log_overlay_error(exc)
-
-    # Re-arm. Reached on every active frame AND after a caught exception,
-    # so the ONLY way the loop stops is the clean idle-park above (which
-    # sets overlay_anim_job = None). That keeps update_overlay()'s
-    # "is None" restart check an honest signal of "loop is parked."
+        if _indicator_failures >= INDICATOR_GIVE_UP:
+            _write_error_log("indicator", RuntimeError(
+                "the indicator kept failing - it is off until Scribe restarts"))
+            try:
+                overlay.close()
+            except Exception:
+                pass
+            overlay = None
+            _stop_indicator()
+            return
+    spent = (time.monotonic() - started) * 1000
     try:
-        overlay_anim_job = root.after(OVERLAY_TICK_MS, _overlay_tick)
+        overlay_anim_job = root.after(max(1, int(INDICATOR_FRAME_MS - spent)), _indicator_tick)
     except Exception:
-        # root.after only fails while Tk is tearing down at shutdown -
-        # there is nothing left to animate, so let the loop end quietly.
-        overlay_anim_job = None
+        _stop_indicator()           # Tk is shutting down: nothing left to draw
 
 
 def update_overlay(state):
-    """Switch overlay state. The pill is always visible; this just changes
-    what the tick loop is animating toward (and starts the loop if it
-    is currently parked)."""
-    global overlay_state, overlay_anim_phase
+    """Show `state` ("recording", "transcribing" or "idle") on the
+    indicator. Main thread only (from _apply_status). Starts the frame loop
+    if it is parked; the loop parks itself once the capsule has folded away."""
+    global overlay_state, _indicator_xy
+    overlay_state = state
     if overlay is None:
         return
-    overlay_state = state
-    # Reset the inner animation phase when ENTERING an active state, so
-    # the bars start near zero instead of mid-swing.
-    if state in ("recording", "transcribing"):
-        overlay_anim_phase = 0
-    # Clear the live-waveform buffer at the start of each recording so
-    # the new dictation doesn't briefly show leftover bars from the
-    # previous one before audio_callback feeds in fresh levels.
-    if state == "recording":
-        overlay_bar_levels[:] = [0.0] * OVERLAY_BARS
-    # Kick off the tick loop if it stopped. It will run until the pill
-    # settles at the new state's target size (or, for idle, until the
-    # collapse animation finishes).
-    if overlay_anim_job is None:
-        _overlay_tick()
+    now = time.monotonic()
+    if indicator_motion.hidden(now) and state in ("recording", "transcribing"):
+        _indicator_xy = None        # appearing: on the monitor you're on NOW
+    indicator_motion.set_state(state, now)
+    if overlay_anim_job is None and not indicator_motion.hidden(now):
+        indicator.fine_timer(True)  # steady 60 fps while it moves (see fine_timer)
+        _indicator_tick()
 
 
 # =============================================================================
@@ -4868,6 +4611,12 @@ def shutdown():
     root.destroy()   # ends root.mainloop(), so the program exits
 
 
+# How often the main thread drains ui_queue. Short, because the indicator
+# opens from here when you press the hotkey: at 25 ms it appears within a
+# frame or two (a queue check costs microseconds).
+UI_POLL_MS = 25
+
+
 def poll_ui_queue():
     """
     Run on the main thread ~10x per second. Reads commands that background
@@ -4904,7 +4653,7 @@ def poll_ui_queue():
     except queue.Empty:
         pass
     # Schedule ourselves to run again in 100 milliseconds.
-    root.after(100, poll_ui_queue)
+    root.after(UI_POLL_MS, poll_ui_queue)
 
 
 # =============================================================================
@@ -5123,8 +4872,8 @@ def main():
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", on_quit),
     )
-    tray_icon = pystray.Icon(
-        "scribe", icon=ICON_IDLE, title="Scribe - ready", menu=menu
+    tray_icon = _TrayIcon(
+        "scribe", icon=_tray_image("idle"), title="Scribe - ready", menu=menu
     )
     def _on_tray_ready(icon):
         # pystray calls this (on its own thread) once the icon exists; it
@@ -5196,10 +4945,11 @@ def main():
     # title bars AND taskbar buttons. default=True covers all of them.
     # app_icon_photo is kept referenced so Python does not discard the image.
     global app_icon_photo
-    app_icon_photo = ImageTk.PhotoImage(ICON_IDLE)
+    app_icon_photo = ImageTk.PhotoImage(brand.app_icon(64))
     root.iconphoto(True, app_icon_photo)
-    build_overlay()                 # create the (hidden) status overlay
-    root.after(100, poll_ui_queue)  # start the queue-checking loop
+    build_overlay()                 # the indicator's window (hidden until you dictate)
+    root.after(UI_POLL_MS, poll_ui_queue)  # start the queue-checking loop
+    root.after(TRAY_THEME_MS, _tray_theme_tick)  # the tray mark follows the taskbar theme
     # Seed the quota state and start its refresh loop. Running it once
     # here (before the first tick fires QUOTA_TICK_MS later) means the
     # pill / tooltip reflect carried-over usage from earlier in the day

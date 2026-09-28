@@ -6,4 +6,4 @@ Bump it for every release, in the same commit that the release is tagged on
 ("v" + VERSION): 1.0.1 for fixes, 1.1.0 for new features.
 """
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"

@@ -87,8 +87,22 @@ def test_main_asks_before_deleting():
     print("PASS  uninstall asks before deleting data or keys, and waits for Scribe to quit.")
 
 
+def test_new_icons_show_at_once():
+    # After an update brings a new scribe.ico, Windows keeps showing the old
+    # picture on the Start menu and taskbar until it is told icons changed.
+    with mock.patch.object(install_shortcut.ctypes.windll.shell32, "SHChangeNotify") as notify:
+        install_shortcut.refresh_icons()
+    assert notify.call_args.args[0] == 0x08000000, "SHCNE_ASSOCCHANGED"
+    start = tempfile.mkdtemp()
+    with mock.patch.object(install_shortcut, "SHORTCUT_PATH", os.path.join(start, "Scribe.lnk")),          mock.patch.object(install_shortcut, "PINNED_TASKBAR", os.path.join(start, "none")),          mock.patch.object(install_shortcut, "find_pythonw", return_value=sys.executable),          mock.patch.dict(os.environ, {"SCRIBE_DATA_DIR": ""}),          mock.patch.object(install_shortcut, "refresh_icons") as refresh:
+        install_shortcut.main()
+    assert refresh.called, "setup refreshes the icons after writing the shortcuts"
+    print("PASS  after (re)writing the shortcuts, Windows is told the icons changed.")
+
+
 if __name__ == "__main__":
     test_only_this_copys_shortcuts_go()
     test_only_a_real_data_folder_can_be_deleted()
     test_main_asks_before_deleting()
+    test_new_icons_show_at_once()
     print("\nAll uninstall tests passed.")

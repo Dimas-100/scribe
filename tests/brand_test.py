@@ -103,6 +103,21 @@ def test_the_dashboard_mark_matches_the_logo():
     print("PASS  the dashboard's mark is brand.mark_svg() - one source for the logo.")
 
 
+def test_the_shipped_files_are_the_new_logo():
+    ico = Image.open(os.path.join(ROOT, "scribe.ico"))
+    assert {(s, s) for s in brand.ICO_SIZES} <= set(ico.info["sizes"]), ico.info["sizes"]
+    ico.size = (256, 256)
+    big = ico.convert("RGBA")
+    r, g, b, a = big.getpixel((128, 24))
+    assert a > 200 and max(r, g, b) < 80 and abs(r - g) < 12, ("the dark tile, not the old green", (r, g, b))
+    for name, dark in (("logo.svg", False), ("logo-dark.svg", True)):
+        with open(os.path.join(ROOT, "docs", "images", name), encoding="utf-8") as f:
+            assert f.read() == brand.logo_svg(dark), f"docs/images/{name} is brand.logo_svg()"
+    readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
+    assert "docs/images/logo.svg" in readme and "docs/images/logo-dark.svg" in readme
+    print("PASS  scribe.ico and the README logo are the new mark.")
+
+
 def test_taskbar_theme_never_raises():
     assert brand.taskbar_is_light() in (True, False)
     print("PASS  reading the taskbar theme never raises.")
@@ -115,5 +130,6 @@ if __name__ == "__main__":
     test_the_tray_icon_carries_crisp_frames()
     test_write_ico_has_every_size()
     test_the_dashboard_mark_matches_the_logo()
+    test_the_shipped_files_are_the_new_logo()
     test_taskbar_theme_never_raises()
     print("\nAll brand tests passed.")

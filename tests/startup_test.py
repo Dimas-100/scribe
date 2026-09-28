@@ -142,11 +142,13 @@ def test_overlay_scales_with_dpi():
     assert app._px(56, scale=1.0) == 56
     assert app._px(56, scale=1.5) == 84 and app._px(4, scale=1.25) == 5
     assert app._px(1, scale=1.0) >= 1
-    assert app.OVERLAY_W == app._px(56) and app.OVERLAY_H_IDLE == app._px(4)
+    (w1, h1), (w2, h2) = app.indicator.window_size(1.0), app.indicator.window_size(1.5)
+    assert abs(w2 - w1 * 1.5) <= 1 and abs(h2 - h1 * 1.5) <= 1
     src = open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
+    assert "indicator.window_size(UI_SCALE)" in src and "indicator.render(frame, UI_SCALE)" in src
     assert src.index('sys.platform != "win32"') < src.index("import numpy"), \
         "the Windows-only check must run before the Windows-only imports"
-    print("PASS  overlay sizes scale with display DPI; non-Windows exits early.")
+    print("PASS  the indicator scales with display DPI; non-Windows exits early.")
 
 
 def test_second_launch_exits_before_heavy_imports():
@@ -207,40 +209,22 @@ def _luma(rgb):
     return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 
 
-def test_the_pill_is_neutral():
-    """The recording pill floats over every app, so it follows no theme: a
-    near-black capsule with a hairline edge, white bars while recording,
-    soft grey while transcribing - and no coloured glow."""
-    from unittest import mock
-    from PIL import ImageFilter
+def test_the_indicator_is_neutral():
+    """The indicator floats over every app, so it follows no theme: a
+    near-black capsule, a white line and caret, a black shadow - greys only,
+    no glow of colour. Only the caret may warm up, near Groq's daily limit."""
+    import numpy as np
     app = import_app_with_mocks()
-    w, h = app.OVERLAY_W, app.OVERLAY_H
-    levels = [0.9, 0.2, 0.6, 1.0, 0.4, 0.8, 0.3, 0.7, 0.5, 0.9, 0.1, 0.6]
-    # No blur anywhere: the glow is gone, not just dimmed.
-    with mock.patch.object(ImageFilter, "GaussianBlur", side_effect=AssertionError("a glow")):
-        rec = app._render_pill(w, h, app.OVERLAY_FILL, levels, app.WAVE_RECORDING)
-        busy = app._render_pill(w, h, app.OVERLAY_FILL, levels, app.WAVE_TRANSCRIBING)
-        plain = app._render_pill(w, h, app.OVERLAY_FILL)
-    assert rec.size == (w, h)
-    # Neutral: no mint, no amber - every visible pixel is a grey.
-    for img in (rec, busy, plain):
-        for px in img.getdata():
-            if px != (0, 0, 0):
-                assert max(px) - min(px) <= 10, px
-    # Recording's bars are bright; transcribing's are a softer grey.
-    assert max(map(_luma, rec.getdata())) > max(map(_luma, busy.getdata())) + 40
-    # A hairline edge: the pill's top row is lighter than its middle.
-    cx = w // 2
-    assert _luma(plain.getpixel((cx, 0))) > _luma(plain.getpixel((cx, h // 2))) + 8
-    # The idle pill's quota nudge is still visible: a warm / red tint you can
-    # tell apart from the neutral fill.
-    iw, ih = app.OVERLAY_W_IDLE, app.OVERLAY_H_IDLE
-    mid = (cx, h - ih // 2)
-    calm = app._render_pill(iw, ih, app.OVERLAY_FILL).getpixel(mid)
-    for tint in (app.OVERLAY_FILL_WARN, app.OVERLAY_FILL_DANGER):
-        tinted = app._render_pill(iw, ih, tint).getpixel(mid)
-        assert (_luma(tinted) + 12) / (_luma(calm) + 12) >= 1.35, (tint, tinted, calm)
-    print("PASS  the pill is neutral: grey capsule, hairline edge, white/grey bars, no glow.")
+    ind = app.indicator
+    base = ind.Frame(width=ind.CAP_W, alpha=1.0, scale=1.0, draw_in=1.0, amp=0.8, phase=1.0,
+                     shimmer=0.5, shimmer_mix=0.0, caret=ind.CARET)
+    for frame in (base, base._replace(amp=0.0, shimmer_mix=1.0)):     # listening, working
+        px = np.asarray(ind.render(frame, 1.0)).reshape(-1, 4).astype(int)
+        seen = px[px[:, 3] > 8]
+        assert (seen[:, :3].max(axis=1) - seen[:, :3].min(axis=1)).max() <= 12, "greys only"
+    for tint in (ind.CARET_WARN, ind.CARET_DANGER):
+        assert tint[0] - tint[2] > 60, "a warm caret you can tell apart"
+    print("PASS  the indicator is neutral: grey capsule, white line, black shadow, no colour.")
 
 
 def test_second_launch_retries():
@@ -266,7 +250,7 @@ if __name__ == "__main__":
     test_control_messages_route_to_the_main_thread()
     test_overlay_scales_with_dpi()
     test_second_launch_exits_before_heavy_imports()
-    test_the_pill_is_neutral()
+    test_the_indicator_is_neutral()
     test_second_launch_retries()
     test_migration_notices_and_first_run()
     print("\nAll startup tests passed.")

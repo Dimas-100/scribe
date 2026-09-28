@@ -1,102 +1,196 @@
-"""
-Faithful verification for the status-pill animation fix.
+r"""
+Standalone probe for the status visuals inside app.py: the indicator (the
+capsule that appears while you dictate - drawn by indicator.py) and the tray
+icon (brand.py), driven through the app's own code on a real Tk root.
 
-This imports the REAL app module (so we exercise the exact production code,
-not a copy) and drives the overlay through its three states the same way
-update_status() does in normal use - via update_overlay() on the Tk main
-thread. It checks three things:
+Run from the project root:   venv\Scripts\python tests\overlay_test.py
 
-  1. EXPAND   - on "recording", the pill grows from the collapsed idle
-                height (OVERLAY_H_IDLE) toward the active height (OVERLAY_H).
-  2. SELF-HEAL - we force ONE _draw_pill() call to raise mid-recording.
-                The old code would freeze the pill permanently here; the
-                fixed code must log the error and keep animating.
-  3. COLLAPSE - on "idle", the pill eases back to its idle height and the loop parks
-                (overlay_anim_job goes back to None).
-
-Run from the project root:  python tests/overlay_test.py
-Safe to run while Scribe is running - tests/harness.py mocks the port, the
-model and the mic, and points app.py at a temp data folder.
+Safe: tests/harness.py (temp data folder, mocked model and mic). The
+indicator's window is a stand-in that records what it was asked to show -
+nothing appears on screen - and the tray icon is a mock.
 """
 
 import os
 import sys
+import time
 import tkinter as tk
+from unittest import mock
 
-# Import app.py through the shared harness: its top-level setup runs with
-# the model, mic and port mocked. It does NOT call main(), so no listener or
-# tray threads start - we drive the overlay ourselves below.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import import_app_with_mocks  # noqa: E402
+
 app = import_app_with_mocks()
-
-ERR_BEFORE = os.path.getsize(app.ERROR_LOG) if os.path.exists(app.ERROR_LOG) else 0
-
-results = {}
-
-# Stand up a real (hidden) root + the real overlay, exactly like main() does.
 app.root = tk.Tk()
 app.root.withdraw()
-app.build_overlay()
 
-# --- One-shot fault injection to prove self-healing -------------------------
-_real_draw_pill = app._draw_pill
-_state = {"boom_armed": False, "boom_fired": False}
 
-def _maybe_boom(w, h, *args, **kwargs):
-    # Pass everything through: _draw_pill also takes the live waveform
-    # (bars=, bar_color=), and a wrapper that drops them breaks every frame.
-    if _state["boom_armed"] and not _state["boom_fired"]:
-        _state["boom_fired"] = True
-        raise RuntimeError("injected transient draw failure (test)")
-    return _real_draw_pill(w, h, *args, **kwargs)
+class FakeWindow:
+    """Stands in for indicator.LayeredWindow: records every show/hide."""
 
-app._draw_pill = _maybe_boom
+    def __init__(self, *_size):
+        self.shows, self.hides, self.visible = [], 0, False
 
-def sample(label):
-    results[label] = (round(app._pill_h, 2), app.overlay_anim_job is not None)
-    print(f"  {label:22} pill_h={app._pill_h:5.2f}  loop_alive={app.overlay_anim_job is not None}")
+    def show(self, image, x, y, alpha):
+        self.shows.append((x, y, alpha, image.size))
+        self.visible = True
 
-print("\n=== driving the real overlay ===")
-sample("idle@start")
+    def hide(self):
+        self.hides += 1
+        self.visible = False
 
-# t=200ms: enter recording -> pill should start expanding toward OVERLAY_H.
-app.root.after(200, lambda: (print("-> update_overlay('recording')"), app.update_overlay("recording")))
-app.root.after(1200, lambda: sample("recording@1.2s"))
+    def close(self):
+        self.visible = False
 
-# t=1400ms: arm the fault so the NEXT tick's _draw_pill raises exactly once.
-app.root.after(1400, lambda: _state.__setitem__("boom_armed", True))
-app.root.after(2000, lambda: sample("after-injected-fault"))   # must still be alive + expanded
 
-# t=2400ms: collapse back to idle.
-app.root.after(2400, lambda: (print("-> update_overlay('idle')"), app.update_overlay("idle")))
-app.root.after(3800, lambda: sample("idle@3.8s"))
+def pump(seconds):
+    """Run Tk's loop for `seconds` (the indicator's frames are after() calls)."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        app.root.update()
+        time.sleep(0.002)
 
-app.root.after(4000, app.root.quit)
-app.root.mainloop()
 
-# --- verdict ---------------------------------------------------------------
-err_after = os.path.getsize(app.ERROR_LOG) if os.path.exists(app.ERROR_LOG) else 0
-logged = err_after > ERR_BEFORE
+def fresh():
+    """A new stand-in window and a parked indicator."""
+    if app.overlay_anim_job is not None:
+        app.root.after_cancel(app.overlay_anim_job)
+        app.overlay_anim_job = None
+    app.indicator_motion = app.indicator.Motion()
+    app.overlay_state = "idle"
+    app.quota_state = "ok"
+    app._indicator_failures = 0
+    app._indicator_logged_at = -1e9
+    app.overlay = FakeWindow()
+    return app.overlay
 
-rec_h, rec_alive = results["recording@1.2s"]
-heal_h, heal_alive = results["after-injected-fault"]
-idle_h, idle_alive = results["idle@3.8s"]
 
-print("\n=== verdict ===")
-# Sizes come from app.py itself, so a design tweak can't silently break this.
-ACTIVE_H, IDLE_H = app.OVERLAY_H, app.OVERLAY_H_IDLE
-ok_expand = rec_h >= ACTIVE_H - 2             # grew to (about) the active height
-ok_fired  = _state["boom_fired"]              # the fault actually triggered
-ok_heal   = heal_alive and heal_h >= ACTIVE_H - 2   # survived the fault, still expanded
-ok_logged = logged                            # fault was logged, not silent
-ok_park   = idle_h <= IDLE_H + 2 and not idle_alive  # collapsed and loop parked
+def test_it_opens_follows_and_closes():
+    win = fresh()
+    with mock.patch.object(app.indicator, "fine_timer") as timer:
+        app.update_overlay("recording")
+        pump(0.45)
+        assert win.visible and win.shows[-1][2] > 0.99, "open and fully visible"
+        assert len(win.shows) > 15, f"~60 frames a second ({len(win.shows)} in 0.45 s)"
+        app.update_overlay("transcribing")
+        pump(0.3)
+        assert win.visible
+        app.update_overlay("idle")
+        pump(0.6)
+        assert not win.visible and win.hides >= 1, "folded away"
+        assert app.overlay_anim_job is None, "and nothing runs while hidden"
+        on = [c.args[0] for c in timer.call_args_list]
+        assert on == [True, False], f"fine timer only while animating: {on}"
+    print("PASS  the indicator opens on 'recording', stays while working, folds away on 'idle'.")
 
-print(f"  EXPAND  to active size .......... {'PASS' if ok_expand else 'FAIL'} (h={rec_h})")
-print(f"  fault injected .................. {'yes' if ok_fired else 'NO'}")
-print(f"  SELF-HEAL after fault .......... {'PASS' if ok_heal else 'FAIL'} (alive={heal_alive}, h={heal_h})")
-print(f"  fault was LOGGED (not silent) ... {'PASS' if ok_logged else 'FAIL'}")
-print(f"  COLLAPSE + park ................. {'PASS' if ok_park else 'FAIL'} (h={idle_h}, alive={idle_alive})")
 
-all_ok = ok_expand and ok_fired and ok_heal and ok_logged and ok_park
-print(f"\n  OVERALL: {'ALL PASS' if all_ok else 'FAILURE'}")
+def test_it_opens_on_your_monitor():
+    win = fresh()
+    with mock.patch.object(app.indicator, "work_area", return_value=(1920, 0, 3840, 1040)), \
+         mock.patch.object(app.indicator, "fine_timer"):
+        app.update_overlay("recording")
+        pump(0.1)
+        app.update_overlay("idle")
+        pump(0.6)
+    x, y = win.shows[0][:2]
+    assert (x, y) == app.indicator.place((1920, 0, 3840, 1040), app.UI_SCALE), (x, y)
+    print("PASS  it opens on the monitor you're working on, just above the taskbar.")
+
+
+def test_a_bad_frame_heals_and_is_logged():
+    win = fresh()
+    before = os.path.getsize(app.ERROR_LOG) if os.path.exists(app.ERROR_LOG) else 0
+    real = app.indicator.render
+    calls = {"n": 0}
+
+    def flaky(frame, scale):
+        calls["n"] += 1
+        if calls["n"] == 5:
+            raise RuntimeError("injected draw failure (test)")
+        return real(frame, scale)
+    with mock.patch.object(app.indicator, "render", side_effect=flaky), \
+         mock.patch.object(app.indicator, "fine_timer"):
+        app.update_overlay("recording")
+        pump(0.4)
+        shown_after = len(win.shows)
+        app.update_overlay("idle")
+        pump(0.6)
+    assert calls["n"] > 10 and shown_after > 10, "kept animating past the bad frame"
+    assert os.path.getsize(app.ERROR_LOG) > before, "the bad frame was logged"
+    assert app.overlay is win, "one bad frame doesn't turn it off"
+    print("PASS  one bad frame is logged and the indicator carries on.")
+
+
+def test_a_broken_indicator_turns_itself_off():
+    fresh()
+    with mock.patch.object(app.indicator, "render", side_effect=RuntimeError("always")), \
+         mock.patch.object(app.indicator, "fine_timer"), \
+         mock.patch.object(app, "_write_error_log") as log:
+        app.update_overlay("recording")
+        pump(1.5)
+    assert app.overlay is None and app.overlay_anim_job is None, "gave up, cleanly"
+    assert 1 <= log.call_count <= 3, f"logged, not flooded ({log.call_count} lines)"
+    app.update_overlay("recording")                 # and later states are harmless
+    print("PASS  a broken indicator logs once, turns itself off, and dictation goes on.")
+
+
+def test_no_window_means_no_indicator():
+    with mock.patch.object(app.indicator, "LayeredWindow", side_effect=OSError("refused")), \
+         mock.patch.object(app, "_write_error_log") as log:
+        app.build_overlay()
+    assert app.overlay is None and log.called
+    app.update_overlay("recording")
+    assert app.overlay_anim_job is None
+    print("PASS  if Windows won't make the window, Scribe runs without it (and says why in the log).")
+
+
+def test_the_quota_colours_the_caret():
+    fresh()
+    seen = []
+    real = app.indicator.render
+
+    def spy(frame, scale):
+        seen.append(frame.caret)
+        return real(frame, scale)
+    with mock.patch.object(app.indicator, "render", side_effect=spy), \
+         mock.patch.object(app.indicator, "fine_timer"):
+        app.quota_state = "warn"
+        app.update_overlay("recording")
+        pump(0.15)
+        app.quota_state = "danger"
+        pump(0.15)
+        app.update_overlay("idle")
+        pump(0.6)
+    assert app.indicator.CARET_WARN in seen and app.indicator.CARET_DANGER in seen
+    app.quota_state = "ok"
+    print("PASS  near the Groq daily limit the caret turns amber, then rose.")
+
+
+def test_the_tray_shows_the_state_and_follows_the_taskbar():
+    app.tray_icon = mock.MagicMock()
+    app.tray_icon.icon = None
+    app.tray_icon.title = ""
+    with mock.patch.object(app, "update_overlay"):
+        app._apply_status("recording")
+        assert app.tray_icon.icon is app._tray_image("recording")
+        app._apply_status("idle")
+        assert app.tray_icon.icon is app._tray_image("idle")
+        light_before = app.TRAY_LIGHT
+        with mock.patch.object(app.brand, "taskbar_is_light", return_value=not light_before), \
+             mock.patch.object(app, "_refresh_status") as refresh:
+            app._tray_theme_tick()
+            assert app.TRAY_LIGHT is (not light_before) and refresh.called
+        app._apply_status("idle")
+        assert app.tray_icon.icon is app._tray_image("idle")
+    app.tray_icon = None
+    print("PASS  the tray mark shows the state and turns white/ink with the taskbar.")
+
+
+if __name__ == "__main__":
+    test_it_opens_follows_and_closes()
+    test_it_opens_on_your_monitor()
+    test_a_bad_frame_heals_and_is_logged()
+    test_a_broken_indicator_turns_itself_off()
+    test_no_window_means_no_indicator()
+    test_the_quota_colours_the_caret()
+    test_the_tray_shows_the_state_and_follows_the_taskbar()
+    print("\nAll overlay tests passed.")

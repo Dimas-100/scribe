@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
+  <img alt="Scribe's logo: a wave flowing into a text cursor" src="docs/images/logo.svg" width="72">
+</picture>
+
 # Scribe
 
 **Voice dictation for Windows.** Hold a hotkey, speak, let go — your words are typed
@@ -54,6 +59,12 @@ to see the dashboard.
 | Say only **"new line"** / **"new paragraph"** | Insert a line break |
 | Double-click the tray icon | Open the dashboard |
 | Right-click the tray icon → **Quit** | Quit |
+
+While you talk, a small capsule at the bottom of your screen shows Scribe listening — a
+wave flowing into a text cursor, as lively as your voice. When you let go it settles
+into a line while Scribe types, then folds away.
+
+<img alt="The capsule while you talk (a wave flowing into a text cursor) and while Scribe types" src="docs/images/indicator.png" width="440">
 
 Voice commands work when they are the *whole* dictation — tap the hotkey, say just the
 command, release. You can change the hotkey in **Settings**; if you use Windows'

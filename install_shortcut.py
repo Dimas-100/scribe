@@ -36,6 +36,7 @@ r"""
 =============================================================================
 """
 
+import ctypes
 import os
 import sys
 
@@ -129,6 +130,17 @@ def launches_this_scribe(path):
     return os.path.normcase(APP_PY) in os.path.normcase(lnk.Arguments or "")
 
 
+def refresh_icons():
+    """Tell Windows that icons changed, so the Start menu and taskbar pins
+    show the current scribe.ico right away - Windows otherwise keeps the old
+    picture in its icon cache (after an update brings a new logo). Harmless
+    if nothing changed."""
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)   # SHCNE_ASSOCCHANGED
+    except Exception:
+        pass
+
+
 def main():
     # A portable copy (its own data folder, SCRIBE_DATA_DIR - also how a test
     # install runs) must never take over the Start-menu "Scribe" entry or a
@@ -164,6 +176,7 @@ def main():
                     repinned.append(path)
             except Exception as exc:
                 print(f"  (couldn't check {name}: {exc})")
+    refresh_icons()
 
     print("Done.")
     print()

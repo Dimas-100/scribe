@@ -76,7 +76,10 @@ holds standalone `*_test.py` scripts, run directly from the project root
   mocked): `storage_test`, `devices_test`, `startup_test`, `notify_test`,
   `mic_handling_test`, `cloud_test`, `dashboard_test`, `input_test`,
   `delivery_test`, `clipboard_test` (uses the real clipboard but restores
-  it), `overlay_test`, `keystore_test` (one real Credential Manager
+  it), `overlay_test` (the indicator through app.py with a stand-in window,
+  the tray mark with a mock), `indicator_test` (its one real window is shown
+  fully transparent, far off screen), `brand_test` (writes one .ico to a temp
+  folder; reads the taskbar theme only), `keystore_test` (one real Credential Manager
   round-trip on a throwaway name), `instance_test`, `autostart_test`
   (throwaway registry keys), `model_manager_test`, `model_flow_test`,
   `first_run_test`, `learning_test`, `fix_watch_test` (a scripted fake reader),
@@ -252,6 +255,23 @@ name and bypasses it). Small shared modules sit under both processes:
   `focused_box(hwnd)` (same process, never a password box, TextPattern or
   ValuePattern), `read(box)` (<= 20,000 chars, never raises). Created on the
   watcher's thread (COM).
+- `brand.py` — the logo: a wave flowing into a text caret ("~|"), one
+  geometry drawn everywhere: `app_icon(size)` (dark tile, every size drawn for
+  itself - never scaled down), `write_ico()` (scribe.ico), `tray_icon(state,
+  light_taskbar)` (the bare mark, white/ink by taskbar theme, red caret while
+  recording, 50% while transcribing; `info["frames"]` holds one frame per tray
+  size), `mark_svg()` (the dashboard's `.mark` - `brand_test` checks the page
+  uses exactly it), `logo_svg(dark)` (docs/images/logo*.svg), and
+  `taskbar_is_light()` (registry read).
+- `indicator.py` (app only) — the capsule shown while dictating: `Motion`
+  (pure; `set_state(state, now)` + `step(now, level)` -> `Frame` or None;
+  every property glides by time and retargets from its current value, so a
+  press mid-close just re-opens), `render(frame, scale)` (PIL, 3x
+  supersampled; the shadow + capsule cached by size), `LayeredWindow` (a Win32
+  layered window - UpdateLayeredWindow with per-pixel alpha, click-through,
+  no focus, topmost; private WinDLL handles so its argtypes never leak),
+  `place()` / `work_area()` (the foreground window's monitor) and
+  `fine_timer()` (1 ms timer resolution only while animating).
 - `model_manager.py` (app only) — the local Whisper model on a background
   thread: find in cache (no network) / download with byte progress (plain
   HTTPS, not Xet) / load / swap; states waiting, loading, downloading, ready,
@@ -262,9 +282,17 @@ because almost every bug class here is a cross-thread one.
 
 The main threads:
 
-- **Main thread** — owns Tkinter. The hidden `root` window, the status
-  overlay AND the tray icon's picture/tooltip may *only* be touched here
-  (`update_status()` just queues; `_apply_status()` runs here).
+- **Main thread** — owns Tkinter. The hidden `root` window, the indicator
+  (its layered window and `indicator_motion`) AND the tray icon's
+  picture/tooltip may *only* be touched here (`update_status()` just queues;
+  `_apply_status()` runs here). `update_overlay(state)` starts the
+  indicator's frame loop (`_indicator_tick`, root.after ~16 ms, with
+  `fine_timer` on); it parks itself once the capsule has folded away. A bad
+  frame is logged (at most once a minute) and the next frame retries; 60 bad
+  frames in a row switch the indicator off until restart. `_tray_theme_tick`
+  (every 3 s) redraws the tray mark when Windows switches light/dark;
+  `_TrayIcon` loads the tray picture at the small-icon size from its own
+  frames (pystray would load 32 px and let Windows shrink it).
   `root.mainloop()` blocks the main thread until shutdown.
 - **Keyboard listener thread** (`pynput`) — runs inside Windows' low-level
   keyboard hook. `on_press` / `on_release` do nothing but drop REAL key
@@ -333,8 +361,9 @@ and device-name lookups too).
 
 **Crossing threads safely:** background threads never touch Tkinter directly.
 They drop a command into the `ui_queue` (a `queue.Queue`). `poll_ui_queue()`
-runs on the main thread every 100 ms, drains the queue, and does the real UI
-work. The tray menu callbacks (`on_open_dashboard`, `on_quit`) and
+runs on the main thread, drains the queue, and does the real UI
+work (every `UI_POLL_MS` = 25 ms, so the indicator opens within a frame or two of
+the press). The tray menu callbacks (`on_open_dashboard`, `on_quit`) and
 `update_status()` follow this pattern. If you add UI work triggered from a
 background thread, route it through `ui_queue` — do not call Tkinter directly.
 

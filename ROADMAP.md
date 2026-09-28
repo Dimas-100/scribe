@@ -35,6 +35,9 @@ a time.
   transcription: collapses whitespace, removes spaces before punctuation,
   capitalizes sentence starts and standalone "i". Deterministic and safe —
   no proper-noun guessing.
+- **A new look for dictating, and a logo** — ✅ *Done (1.2).* The capsule that appears
+  while you talk is Scribe's mark come alive (a wave flowing into a text cursor), drawn
+  in a real see-through window at 60 fps; the logo is that mark on a dark tile.
 - **A Dictionary that fills itself** — ✅ *Done (1.1).* Scribe learns the words you fix
   right after it types them (it reads that text box back through Windows UI Automation)
   and the names you say often; the Dictionary page lists what it learned, one click to
