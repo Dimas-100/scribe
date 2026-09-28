@@ -152,6 +152,100 @@ def test_it_renders_fast_enough_for_60fps():
     print(f"PASS  a frame renders in {ms:.1f} ms at 200% scaling.")
 
 
+def _dictation(m, level_at=lambda t: 0.06 + 0.05 * abs((t * 7) % 2 - 1)):
+    """Frames of a whole dictation at 60 fps: press, talk, let go, work, the
+    text lands, a quick second press mid-close, and the close."""
+    changes = [(0.0, "recording"), (1.2, "transcribing"), (2.2, "idle"),
+               (2.35, "recording"), (2.6, "idle")]
+    frames, t = [], 0.0
+    while t < 3.4:
+        while changes and t >= changes[0][0]:
+            m.set_state(changes.pop(0)[1], t)
+        f = m.step(t, level_at(t))
+        if f is not None:
+            frames.append((t, f))
+        t += FRAME
+    return frames
+
+
+def test_every_frame_renders():
+    # A frame at the very end of the line once rounded past it and raised
+    # (a negative number to a fractional power is a complex number).
+    for scale in (1.0, 1.25, 1.5, 1.75, 2.0):
+        for _t, f in _dictation(indicator.Motion()):
+            indicator.render(f, scale)
+    print("PASS  every frame of a whole dictation renders, at five display scales.")
+
+
+def test_a_whole_opening_is_fast_at_200_percent():
+    # At 200% scaling a frame has 4x the pixels of 100%. Opening and closing
+    # frames (the capsule changing size: nothing cached) and steady frames
+    # (while you talk) must leave the 16.7 ms of a 60 fps frame mostly free.
+    frames = _dictation(indicator.Motion())
+    groups = {"opening/closing": [f for _t, f in frames if abs(f.width - indicator.CAP_W) > 0.5],
+              "steady": [f for _t, f in frames if abs(f.width - indicator.CAP_W) <= 0.5]}
+    budget = {"opening/closing": 7.0, "steady": 4.0}
+    for name, group in groups.items():
+        indicator._bodies.clear()
+        times = []
+        for f in group:
+            t0 = time.perf_counter()
+            indicator.render(f, 2.0)
+            times.append((time.perf_counter() - t0) * 1000)
+        times.sort()
+        median = times[len(times) // 2]
+        assert median < budget[name], f"{name} frames take {median:.1f} ms (median) at 200%"
+        print(f"PASS  {name} frames take {median:.1f} ms (median) at 200% scaling.")
+
+
+def test_the_cache_stays_small():
+    for _t, f in _dictation(indicator.Motion()):
+        indicator.render(f, 2.0)
+    assert len(indicator._bodies) <= 16, len(indicator._bodies)
+    print("PASS  the drawing cache keeps only a few capsule sizes.")
+
+
+def _line_ends(img, scale):
+    """Brightness of the line near its start and near its end."""
+    a = np.asarray(img).astype(int)
+    h, w = a.shape[:2]
+    cy, cx = h // 2, w // 2
+    left = cx - int(round((indicator.CAP_W / 2 - indicator.LINE_LEFT - 2) * scale))
+    right = (cx + int(round((indicator.CAP_W / 2 - indicator.CARET_INSET - indicator.LINE_GAP - 2)
+                            * scale)))
+    return a[cy, left, :3].max(), a[cy, right, :3].max()
+
+
+def test_the_working_light_never_blinks():
+    m = indicator.Motion()
+    m.set_state("recording", 0.0)
+    run(m, FRAME, 0.3)
+    m.set_state("transcribing", 0.3)
+    frames = [f for t, f in run(m, 0.3 + FRAME, 3.0) if t > 0.9]
+    # Where the light wraps round (from past the caret back to the start),
+    # the ends of the line must not jump: the light fades out before it
+    # leaves and fades in as it comes back.
+    wraps = [(a, b) for a, b in zip(frames, frames[1:]) if b.shimmer < a.shimmer]
+    assert len(wraps) >= 2
+    for a, b in wraps:
+        (l0, r0), (l1, r1) = (_line_ends(indicator.render(f, 2.0), 2.0) for f in (a, b))
+        assert abs(l1 - l0) < 6 and abs(r1 - r0) < 6, ((l0, r0), (l1, r1))
+    print("PASS  the working light glides in and out - the line's ends never blink.")
+
+
+def test_it_closes_without_a_flash():
+    m = indicator.Motion()
+    m.set_state("recording", 0.0)
+    run(m, FRAME, 0.3)
+    m.set_state("transcribing", 0.3)
+    working = run(m, 0.3 + FRAME, 1.2)[-1][1]
+    m.set_state("idle", 1.55)
+    closing = [f for t, f in run(m, 1.55 + FRAME, 0.5) if f is not None and f.draw_in > 0.05]
+    assert closing and all(f.shimmer_mix >= working.shimmer_mix - 0.05 for f in closing), \
+        "the dimmed line stays dim while it slips into the caret"
+    print("PASS  the text lands: the line slips away without flashing brighter.")
+
+
 def test_it_sits_just_above_the_taskbar():
     x, y = indicator.place((0, 0, 1920, 1040), 1.0)
     w, h = indicator.window_size(1.0)
@@ -174,6 +268,9 @@ def test_the_real_window():
                             phase=0.0, shimmer=0.0, shimmer_mix=0.0, caret=indicator.CARET)
         win.show(indicator.render(f, 1.0), -32000, -32000, 0)   # invisible, off screen
         assert win.visible
+        # It holds no screen DC between frames: one kept for the whole session
+        # can go stale when displays change (docking, a monitor unplugged).
+        assert not getattr(win, "_screen", None)
         win.hide()
         assert not win.visible
     finally:
@@ -190,6 +287,11 @@ if __name__ == "__main__":
     test_working_glides_a_light_along_the_line()
     test_the_look()
     test_it_renders_fast_enough_for_60fps()
+    test_every_frame_renders()
+    test_a_whole_opening_is_fast_at_200_percent()
+    test_the_cache_stays_small()
+    test_the_working_light_never_blinks()
+    test_it_closes_without_a_flash()
     test_it_sits_just_above_the_taskbar()
     test_the_real_window()
     print("\nAll indicator tests passed.")

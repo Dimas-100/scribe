@@ -77,8 +77,12 @@ def test_the_tray_mark_follows_the_taskbar_and_the_state():
 def test_the_tray_icon_carries_crisp_frames():
     img = brand.tray_icon("idle", light_taskbar=False)
     frames = img.info["frames"]
-    for size in (16, 20, 24, 32, 40, 48):
+    for size in (16, 20, 24, 28, 32, 36, 40, 48):      # 100% .. 300% scaling, 175% and 225% too
         assert frames[size].size == (size, size)
+    png = brand.frame_png(img, 28)
+    assert png[:4] == b"\x89PNG" and Image.open(__import__("io").BytesIO(png)).size == (28, 28)
+    assert Image.open(__import__("io").BytesIO(brand.frame_png(img, 30))).size == (30, 30), \
+        "an in-between size: the next bigger frame, scaled down"
     data = brand.ico_bytes(img)
     back = Image.open(__import__("io").BytesIO(data))
     assert {(16, 16), (24, 24), (32, 32)} <= set(back.info["sizes"]), back.info["sizes"]

@@ -34,5 +34,6 @@ one notice, not one per dictation.
 | `history_failed` | Couldn't update your history | Your text was handled, but Scribe couldn't update its history file. Details are in the error log. |
 | `settings_recovered` | Settings restored | Your settings file couldn't be read, so Scribe restored the last working copy. The damaged file was kept as {file}. |
 | `learned:<word>` | Learned “{word}” | Scribe will listen for it from now on. You can remove it on the Dictionary page. |
+| `indicator_off` | The on-screen indicator is off | It kept failing to draw, so Scribe turned it off until the next restart. Dictation works as usual. |
 | `update` | Scribe {version} is available | Open Scribe's Settings → About and click Update now. It takes about a minute. |
 | `background_error` | Something went wrong | Scribe kept running. Details are in the error log (tray → Open data folder). |

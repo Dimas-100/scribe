@@ -119,12 +119,15 @@ class _Glide:
         return now >= self.t0 + self.dur
 
 
-Frame = namedtuple("Frame", "width alpha scale draw_in amp phase shimmer shimmer_mix caret")
+Frame = namedtuple("Frame", "width alpha scale draw_in amp phase shimmer shimmer_mix caret glow",
+                   defaults=(1.0,))
 Frame.__doc__ = """What to draw: capsule `width` (100% px), `alpha` and `scale`
 (0..1), how much of the line is drawn (`draw_in`, from the caret leftward),
 wave height `amp` (0..1) and travel `phase`, the working light's position
-`shimmer` (0 = line start, 1 = caret) and strength `shimmer_mix`, and the
-`caret` colour."""
+`shimmer` (0 = line start, 1 = caret), how much the line is dimmed for it
+(`shimmer_mix`) and how bright the light is right now (`glow`: it fades in
+and out on each pass, so the line's ends never blink), and the `caret`
+colour."""
 
 
 class Motion:
@@ -174,8 +177,9 @@ class Motion:
             self.shimmer_mix.to(1.0, now, 0.25, ease_in_out_cubic, delay=0.15)
             self.shimmer_t0 = now + 0.15
         else:
+            # (shimmer_mix is left as it is: after working, the dimmed line
+            # stays dim as it slips into the caret - no flash of white.)
             self.flat.to(1.0, now, 0.12, ease_in_out_cubic)
-            self.shimmer_mix.to(0.0, now, 0.12)
             self.draw_in.to(0.0, now, 0.15, ease_in_cubic)
             self.width.to(DOT, now, 0.18, ease_in_out_cubic, delay=0.12)
             self.scale.to(0.9, now, 0.13, ease_in_cubic, delay=0.23)
@@ -204,10 +208,12 @@ class Motion:
         amp = max(LEVEL_FLOOR, self.level) * (1 - self.flat.value(now))
         p = ((now - self.shimmer_t0) / SHIMMER_PERIOD) % 1.0
         shimmer = -0.15 + 1.3 * (0.5 - 0.5 * math.cos(math.pi * p))   # glides in and out
+        glow = math.sin(math.pi * p)          # ...and fades in and out: no jump at the wrap
         return Frame(width=self.width.value(now), alpha=max(0.0, min(1.0, self.alpha.value(now))),
                      scale=self.scale.value(now), draw_in=max(0.0, min(1.0, self.draw_in.value(now))),
                      amp=amp, phase=self.phase, shimmer=shimmer,
-                     shimmer_mix=max(0.0, min(1.0, self.shimmer_mix.value(now))), caret=self.caret)
+                     shimmer_mix=max(0.0, min(1.0, self.shimmer_mix.value(now))), caret=self.caret,
+                     glow=glow)
 
 
 # =============================================================================
@@ -232,11 +238,13 @@ def place(work_area, scale):
 
 
 _bodies = OrderedDict()      # (width, height, scale) -> shadow + capsule
+BODY_CACHE = 12              # sizes kept (the steady one is what matters)
 
 
 def _body(width, height, scale):
     """The shadow and the empty capsule. Cached: while you talk the capsule
-    keeps its size, so only the line is drawn each frame."""
+    keeps its size, so only the line is drawn each frame. (A few sizes only:
+    the opening and closing sizes are each seen once.)"""
     key = (round(width * 2) / 2, round(height * 2) / 2, scale)
     img = _bodies.get(key)
     if img is not None:
@@ -245,21 +253,28 @@ def _body(width, height, scale):
     W, H = window_size(scale)
     cx, cy = W / 2, H / 2
     sw, sh = key[0] * scale, key[1] * scale
-    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    # The shadow is soft anyway: drawn and blurred at HALF size (4x fewer
+    # pixels to blur), then scaled up.
+    small = Image.new("RGBA", ((W + 1) // 2, (H + 1) // 2), (0, 0, 0, 0))
     drop = SHADOW_DROP * scale
-    ImageDraw.Draw(shadow).rounded_rectangle(
-        (cx - sw / 2, cy - sh / 2 + drop, cx + sw / 2, cy + sh / 2 + drop), radius=sh / 2, fill=SHADOW)
-    shadow = shadow.filter(ImageFilter.GaussianBlur(SHADOW_BLUR * scale))
-    big = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
-    box = (SS * (cx - sw / 2), SS * (cy - sh / 2), SS * (cx + sw / 2), SS * (cy + sh / 2))
+    ImageDraw.Draw(small).rounded_rectangle(
+        ((cx - sw / 2) / 2, (cy - sh / 2 + drop) / 2, (cx + sw / 2) / 2, (cy + sh / 2 + drop) / 2),
+        radius=sh / 4, fill=SHADOW)
+    img = small.filter(ImageFilter.GaussianBlur(SHADOW_BLUR * scale / 2)).resize((W, H), Image.BILINEAR)
+    # The capsule: drawn 3x bigger for smooth edges - but only its own box.
+    bx0, by0 = max(0, int(math.floor(cx - sw / 2)) - 1), max(0, int(math.floor(cy - sh / 2)) - 1)
+    bx1, by1 = min(W, int(math.ceil(cx + sw / 2)) + 1), min(H, int(math.ceil(cy + sh / 2)) + 1)
+    bw, bh = bx1 - bx0, by1 - by0
+    box = (SS * (cx - sw / 2 - bx0), SS * (cy - sh / 2 - by0),
+           SS * (cx + sw / 2 - bx0), SS * (cy + sh / 2 - by0))
+    big = Image.new("RGBA", (bw * SS, bh * SS), (0, 0, 0, 0))
     ImageDraw.Draw(big).rounded_rectangle(box, radius=SS * sh / 2, fill=FILL)
     edge = Image.new("RGBA", big.size, (0, 0, 0, 0))     # blended OVER the fill
     ImageDraw.Draw(edge).rounded_rectangle(box, radius=SS * sh / 2, outline=EDGE,
                                            width=max(1, int(round(SS * scale))))
-    capsule = Image.alpha_composite(big, edge).resize((W, H), Image.LANCZOS)
-    img = Image.alpha_composite(shadow, capsule)
+    img.alpha_composite(Image.alpha_composite(big, edge).resize((bw, bh), Image.LANCZOS), (bx0, by0))
     _bodies[key] = img
-    while len(_bodies) > 96:
+    while len(_bodies) > BODY_CACHE:
         _bodies.popitem(last=False)
     return img
 
@@ -272,9 +287,15 @@ def render(frame, scale):
     img = _body(width, height, scale).copy()
     W, H = img.size
     k = scale * SS
-    layer = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
+    # The caret and the line live in a thin band across the capsule: only
+    # that band is drawn (3x supersampled) - a fraction of the window.
+    half = (max(WAVE_H + LINE_W, CARET_H / 2) + 1) * s * scale
+    bx0 = max(0, int(math.floor(W / 2 - width * scale / 2)))
+    bx1 = min(W, int(math.ceil(W / 2 + width * scale / 2)))
+    by0, by1 = max(0, int(math.floor(H / 2 - half))), min(H, int(math.ceil(H / 2 + half)))
+    layer = Image.new("RGBA", ((bx1 - bx0) * SS, (by1 - by0) * SS), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
-    cx, cy = W * SS / 2, H * SS / 2
+    cx, cy = (W / 2 - bx0) * SS, (H / 2 - by0) * SS
     right = cx + width * k / 2
     caret_x = right - CARET_INSET * s * k
     cw, ch = CARET_W * s * k, CARET_H * s * k
@@ -289,8 +310,11 @@ def render(frame, scale):
         pts = []
         for i in range(n + 1):
             x = start + (x1 - start) * i / n
-            t = (x - x0) / (x1 - x0)
-            env = math.sin(math.pi * t) ** 1.6              # calm at both ends
+            # Clamped: rounding can put the last point a hair past the end,
+            # and sin() of that is a tiny NEGATIVE number - which to the power
+            # 1.6 is a complex number (the frame would fail to draw).
+            t = min(1.0, max(0.0, (x - x0) / (x1 - x0)))
+            env = max(0.0, math.sin(math.pi * t)) ** 1.6    # calm at both ends
             y = cy - WAVE_H * s * k * frame.amp * env * math.sin(
                 2 * math.pi * WAVE_PERIODS * t - frame.phase)
             pts.append((x, y, t))
@@ -305,16 +329,18 @@ def render(frame, scale):
             # A light gliding along the line: each piece as bright as its
             # distance from the light, over a dimmed line.
             for (xa, ya, ta), (xb, yb, tb) in zip(pts, pts[1:]):
-                glow = math.exp(-(((ta + tb) / 2 - frame.shimmer) / 0.13) ** 2)
+                glow = frame.glow * math.exp(-(((ta + tb) / 2 - frame.shimmer) / 0.13) ** 2)
                 bright = 0.38 + 0.62 * glow
                 a = 1 - frame.shimmer_mix * (1 - bright)
                 color = INK + (int(255 * a),)
                 d.line((xa, ya, xb, yb), fill=color, width=max(1, int(round(lw))))
                 d.ellipse((xb - r, yb - r, xb + r, yb + r), fill=color)
             xa, ya, ta = pts[0]
-            a = 1 - frame.shimmer_mix * (1 - (0.38 + 0.62 * math.exp(-((ta - frame.shimmer) / 0.13) ** 2)))
+            glow = frame.glow * math.exp(-((ta - frame.shimmer) / 0.13) ** 2)
+            a = 1 - frame.shimmer_mix * (1 - (0.38 + 0.62 * glow))
             d.ellipse((xa - r, ya - r, xa + r, ya + r), fill=INK + (int(255 * a),))
-    return Image.alpha_composite(img, layer.resize((W, H), Image.LANCZOS))
+    img.alpha_composite(layer.resize((bx1 - bx0, by1 - by0), Image.LANCZOS), (bx0, by0))
+    return img
 
 
 # =============================================================================
@@ -404,7 +430,7 @@ class LayeredWindow:
     def __init__(self, width, height):
         self.width, self.height = width, height
         self.visible = False
-        self.hwnd = self._screen = self._mem = self._dib = self._old = None
+        self.hwnd = self._mem = self._dib = self._old = None
         self._bits = ctypes.c_void_p()
         self.hwnd = _user32.CreateWindowExW(_EX_STYLE, "STATIC", "Scribe", _WS_POPUP, 0, 0,
                                             width, height, None, None,
@@ -412,8 +438,9 @@ class LayeredWindow:
         if not self.hwnd:
             raise OSError(ctypes.get_last_error(), "couldn't create the indicator window")
         try:
-            self._screen = _user32.GetDC(None)
-            self._mem = _gdi32.CreateCompatibleDC(self._screen)
+            # A memory DC compatible with the screen - made without holding
+            # a screen DC, which can go stale when displays change.
+            self._mem = _gdi32.CreateCompatibleDC(None)
             bmi = _BMI()
             bmi.bmiHeader.biSize = ctypes.sizeof(_BIH)
             bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight = width, -height   # top-down rows
@@ -437,7 +464,7 @@ class LayeredWindow:
         bgra[..., 3] = rgba[..., 3]
         ctypes.memmove(self._bits, bgra.tobytes(), bgra.nbytes)
         blend = _BLEND(0, 0, max(0, min(255, int(round(alpha * 255)))), 1)   # AC_SRC_ALPHA
-        ok = _user32.UpdateLayeredWindow(self.hwnd, self._screen, ctypes.byref(wintypes.POINT(x, y)),
+        ok = _user32.UpdateLayeredWindow(self.hwnd, None, ctypes.byref(wintypes.POINT(x, y)),
                                          ctypes.byref(wintypes.SIZE(self.width, self.height)),
                                          self._mem, ctypes.byref(wintypes.POINT(0, 0)), 0,
                                          ctypes.byref(blend), 2)                # ULW_ALPHA
@@ -465,9 +492,6 @@ class LayeredWindow:
         if self._mem:
             _gdi32.DeleteDC(self._mem)
             self._mem = None
-        if self._screen:
-            _user32.ReleaseDC(None, self._screen)
-            self._screen = None
         if self.hwnd:
             _user32.DestroyWindow(self.hwnd)
             self.hwnd = None

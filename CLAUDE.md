@@ -260,16 +260,21 @@ name and bypasses it). Small shared modules sit under both processes:
   itself - never scaled down), `write_ico()` (scribe.ico), `tray_icon(state,
   light_taskbar)` (the bare mark, white/ink by taskbar theme, red caret while
   recording, 50% while transcribing; `info["frames"]` holds one frame per tray
-  size), `mark_svg()` (the dashboard's `.mark` - `brand_test` checks the page
+  size, 100-400% scaling; `frame_png(img, size)` its PNG, cached), `mark_svg()`
+  (the dashboard's `.mark` - `brand_test` checks the page
   uses exactly it), `logo_svg(dark)` (docs/images/logo*.svg), and
   `taskbar_is_light()` (registry read).
 - `indicator.py` (app only) — the capsule shown while dictating: `Motion`
   (pure; `set_state(state, now)` + `step(now, level)` -> `Frame` or None;
   every property glides by time and retargets from its current value, so a
-  press mid-close just re-opens), `render(frame, scale)` (PIL, 3x
-  supersampled; the shadow + capsule cached by size), `LayeredWindow` (a Win32
+  press mid-close just re-opens; the working light fades in and out on each
+  pass, and a close after working keeps the line dim - no blink, no flash),
+  `render(frame, scale)` (PIL, 3x supersampled but only the capsule's box and
+  the line's band; the shadow blurred at half size; 12 capsule sizes
+  cached - ~4 ms a frame at 200%), `LayeredWindow` (a Win32
   layered window - UpdateLayeredWindow with per-pixel alpha, click-through,
-  no focus, topmost; private WinDLL handles so its argtypes never leak),
+  no focus, topmost; private WinDLL handles so its argtypes never leak; no
+  screen DC held between frames),
   `place()` / `work_area()` (the foreground window's monitor) and
   `fine_timer()` (1 ms timer resolution only while animating).
 - `model_manager.py` (app only) — the local Whisper model on a background
@@ -287,12 +292,17 @@ The main threads:
   picture/tooltip may *only* be touched here (`update_status()` just queues;
   `_apply_status()` runs here). `update_overlay(state)` starts the
   indicator's frame loop (`_indicator_tick`, root.after ~16 ms, with
-  `fine_timer` on); it parks itself once the capsule has folded away. A bad
-  frame is logged (at most once a minute) and the next frame retries; 60 bad
-  frames in a row switch the indicator off until restart. `_tray_theme_tick`
-  (every 3 s) redraws the tray mark when Windows switches light/dark;
-  `_TrayIcon` loads the tray picture at the small-icon size from its own
-  frames (pystray would load 32 px and let Windows shrink it).
+  `fine_timer` on); it parks itself once the capsule has folded away.
+  `_apply_status` moves the indicator BEFORE the tray icon. A bad frame is
+  logged (at most once a minute) and the next frame retries; 60 bad frames
+  in a row (a locked PC, an unplugged monitor) hide it and the next
+  appearance builds a fresh window; `INDICATOR_RETRIES` such runs in a row
+  switch it off until restart, with the `indicator_off` notice.
+  `_tray_theme_tick` (every 3 s) redraws the tray mark when Windows switches
+  light/dark; `_TrayIcon` gives Windows an HICON made in memory
+  (`_small_icon_handle`: `CreateIconFromResourceEx` on the PNG of the frame
+  drawn for SM_CXSMICON, prepared at startup) - pystray would load 32 px and
+  let Windows shrink it; a failure falls back to pystray for good, logged once.
   `root.mainloop()` blocks the main thread until shutdown.
 - **Keyboard listener thread** (`pynput`) — runs inside Windows' low-level
   keyboard hook. `on_press` / `on_release` do nothing but drop REAL key

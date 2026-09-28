@@ -41,7 +41,8 @@ TILE_RADIUS = 0.29                # corner radius, share of the tile
 LISTENING_RED = (229, 72, 77)     # the tray caret while you talk
 
 ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
-TRAY_SIZES = (16, 20, 24, 32, 40, 48)   # 100% to 300% display scaling
+# The tray's icon size at 100, 125, 150, 175, 200, 225, 250 (300), 350 and 400% scaling.
+TRAY_SIZES = (16, 20, 24, 28, 32, 36, 40, 48, 56, 64)
 
 
 def _weight(size):
@@ -141,12 +142,29 @@ def _tray_frame(size, state, light_taskbar):
 
 def tray_icon(state="idle", light_taskbar=False):
     """The tray picture for `state` ("idle", "recording" or "transcribing").
-    Returns the 48 px image; its info["frames"] holds one frame per tray size,
-    each drawn for that size (see ico_bytes)."""
+    Returns the biggest frame; its info["frames"] holds one frame per tray
+    size, each drawn for that size (see frame_png)."""
     frames = {s: _tray_frame(s, state, light_taskbar) for s in TRAY_SIZES}
     img = frames[max(TRAY_SIZES)].copy()
     img.info["frames"] = frames
     return img
+
+
+def frame_png(img, size):
+    """PNG bytes of a tray_icon() picture at `size` px - its own frame for
+    that size, or (for an in-between size) the next bigger one scaled down.
+    Windows can make an icon straight from these bytes, in memory."""
+    cache = img.info.setdefault("png", {})
+    if size not in cache:
+        frames = img.info.get("frames") or {img.width: img}
+        bigger = [s for s in sorted(frames) if s >= size]
+        frame = frames[bigger[0]] if bigger else frames[max(frames)]
+        if frame.size != (size, size):
+            frame = frame.resize((size, size), Image.LANCZOS)
+        buf = io.BytesIO()
+        frame.save(buf, format="PNG")
+        cache[size] = buf.getvalue()
+    return cache[size]
 
 
 def _ico(frames, out):

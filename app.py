@@ -966,8 +966,17 @@ TRAY_THEME_MS = 3000        # how often the main thread checks the taskbar's the
 
 
 def _tray_images(light):
-    return {state: brand.tray_icon(state, light)
-            for state in ("idle", "recording", "transcribing")}
+    """The three tray pictures, with the tray-size PNG each one needs already
+    made (see _small_icon_handle) - so the first dictation doesn't pay for it."""
+    images = {state: brand.tray_icon(state, light)
+              for state in ("idle", "recording", "transcribing")}
+    try:
+        size = ctypes.windll.user32.GetSystemMetrics(49)       # SM_CXSMICON
+        for image in images.values():
+            brand.frame_png(image, size)
+    except Exception:
+        pass                          # not Windows: nothing to prepare
+    return images
 
 
 TRAY_IMAGES = _tray_images(TRAY_LIGHT)
@@ -995,31 +1004,43 @@ def _tray_theme_tick():
         pass                           # Tk is shutting down
 
 
+def _small_icon_handle(image):
+    """A Windows icon (HICON) of a brand.tray_icon() picture at the tray's own
+    size - made in memory from the frame drawn for that size (no temp file,
+    no disk: a state change costs well under a millisecond)."""
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL("user32", use_last_error=True)    # private: own argtypes
+    user32.CreateIconFromResourceEx.argtypes = [ctypes.c_char_p, wintypes.DWORD, wintypes.BOOL,
+                                                wintypes.DWORD, ctypes.c_int, ctypes.c_int,
+                                                wintypes.UINT]
+    user32.CreateIconFromResourceEx.restype = wintypes.HICON
+    size = user32.GetSystemMetrics(49)                      # SM_CXSMICON
+    png = brand.frame_png(image, size)
+    handle = user32.CreateIconFromResourceEx(png, len(png), True, 0x00030000, size, size, 0)
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "couldn't make the tray icon")
+    return handle
+
+
 class _TrayIcon(pystray.Icon):
     """pystray's tray icon, made crisp. pystray loads its picture at the big
     icon size and lets Windows shrink it into the tray (a soft, blurry mark);
-    this loads it at the tray's own size, from the frame brand.tray_icon()
-    drew for exactly that size. Any problem: pystray's own way."""
+    this gives Windows the frame brand.tray_icon() drew for the tray's exact
+    size (_small_icon_handle). If that ever fails, pystray's own way is used
+    from then on (one line in the error log)."""
+
+    _crisp_failed = False
 
     def _assert_icon_handle(self):
         if getattr(self, "_icon_handle", None):
             return
-        frames = getattr(self.icon, "info", {}).get("frames")
-        if frames and sys.platform == "win32":
+        if (not _TrayIcon._crisp_failed and sys.platform == "win32"
+                and getattr(self.icon, "info", {}).get("frames")):
             try:
-                import tempfile
-                from pystray._util import win32 as pywin32
-                size = ctypes.windll.user32.GetSystemMetrics(49)     # SM_CXSMICON
-                fd, path = tempfile.mkstemp(suffix=".ico")
-                try:
-                    with os.fdopen(fd, "wb") as f:
-                        f.write(brand.ico_bytes(self.icon))
-                    self._icon_handle = pywin32.LoadImage(
-                        None, path, pywin32.IMAGE_ICON, size, size, pywin32.LR_LOADFROMFILE)
-                finally:
-                    os.remove(path)
+                self._icon_handle = _small_icon_handle(self.icon)
                 return
             except Exception as exc:
+                _TrayIcon._crisp_failed = True
                 _write_error_log("tray icon", exc)
         super()._assert_icon_handle()
 
@@ -1084,7 +1105,9 @@ def _idle_tooltip(snap, usable, quota, ratio, pending=False):
 
 
 def _apply_status(state):
-    """Main thread only: show `state` on the tray icon and the indicator."""
+    """Main thread only: show `state` on the indicator and the tray icon -
+    the indicator FIRST, so its opening never waits for the tray's new icon."""
+    update_overlay(state)
     if state == "recording":
         set_state(_tray_image("recording"), "Scribe - recording...")
     elif state == "transcribing":
@@ -1094,7 +1117,6 @@ def _apply_status(state):
         set_state(_tray_image("idle"), _idle_tooltip(models.snapshot(), usable,
                                            quota_state, quota_worst_ratio,
                                            pending=setup_pending))
-    update_overlay(state)
 
 
 # How many dictations are being transcribed/delivered right now. Together
@@ -4094,13 +4116,16 @@ def _px(value, scale=None):
     return max(1, int(round(value * (UI_SCALE if scale is None else scale))))
 
 INDICATOR_FRAME_MS = 1000 / 60   # ~60 frames a second while it's visible
-INDICATOR_GIVE_UP = 60           # this many bad frames IN A ROW: switch it off
+INDICATOR_GIVE_UP = 60           # this many bad frames IN A ROW: step aside (hide)
+INDICATOR_RETRIES = 3            # ...and after this many such runs in a row: off
 INDICATOR_LOG_EVERY = 60.0       # a failing frame is logged at most once a minute
 
 indicator_motion = indicator.Motion()   # what it looks like now (main thread)
 _indicator_xy = None                    # where it opened: the monitor you're on
 _indicator_failures = 0                 # bad frames in a row
 _indicator_logged_at = -1e9             # time.monotonic() of the last logged one
+_indicator_broken_runs = 0              # appearances in a row that kept failing
+_indicator_rebuild = False              # make a fresh window at the next appearance
 
 # Groq whisper free-tier daily limits. Duplicated from dashboard.py
 # (the two processes can't share state) and hard-coded because they
@@ -4301,10 +4326,14 @@ def _indicator_tick():
 
     One bad frame (a Win32 or PIL hiccup) is logged and the next frame just
     tries again: a hiccup must never leave the capsule frozen on screen.
-    Only a run of INDICATOR_GIVE_UP bad frames in a row - something truly
-    broken - switches the indicator off until Scribe restarts; dictation
-    carries on and the tray icon still shows the state."""
+    A second of bad frames in a row (the PC was locked, a monitor unplugged,
+    a remote session minimised...) makes it step aside: hidden, and the next
+    dictation starts with a fresh window. Only if that keeps happening,
+    INDICATOR_RETRIES dictations in a row, is it switched off until Scribe
+    restarts - with a notice; dictation carries on and the tray icon still
+    shows the state."""
     global overlay, _indicator_xy, _indicator_failures, overlay_anim_job
+    global indicator_motion, _indicator_broken_runs, _indicator_rebuild
     started = time.monotonic()
     if overlay is None:
         _stop_indicator()
@@ -4319,18 +4348,31 @@ def _indicator_tick():
         if _indicator_xy is None:
             _indicator_xy = _indicator_position()
         overlay.show(indicator.render(frame, UI_SCALE), *_indicator_xy, frame.alpha)
-        _indicator_failures = 0
+        _indicator_failures = _indicator_broken_runs = 0
     except Exception as exc:
         _indicator_failures += 1
         _log_overlay_error(exc)
         if _indicator_failures >= INDICATOR_GIVE_UP:
-            _write_error_log("indicator", RuntimeError(
-                "the indicator kept failing - it is off until Scribe restarts"))
+            _indicator_failures = 0
+            _indicator_broken_runs += 1
             try:
-                overlay.close()
+                overlay.hide()
             except Exception:
                 pass
-            overlay = None
+            indicator_motion = indicator.Motion()      # hidden; the next press starts afresh
+            if _indicator_broken_runs >= INDICATOR_RETRIES:
+                _write_error_log("indicator", RuntimeError(
+                    "the indicator kept failing - it is off until Scribe restarts"))
+                try:
+                    overlay.close()
+                except Exception:
+                    pass
+                overlay = None
+                notify("indicator_off", "The on-screen indicator is off",
+                       "It kept failing to draw, so Scribe turned it off until the next "
+                       "restart. Dictation works as usual.", cooldown=0)
+            else:
+                _indicator_rebuild = True
             _stop_indicator()
             return
     spent = (time.monotonic() - started) * 1000
@@ -4344,13 +4386,23 @@ def update_overlay(state):
     """Show `state` ("recording", "transcribing" or "idle") on the
     indicator. Main thread only (from _apply_status). Starts the frame loop
     if it is parked; the loop parks itself once the capsule has folded away."""
-    global overlay_state, _indicator_xy
+    global overlay, overlay_state, _indicator_xy, _indicator_rebuild
     overlay_state = state
     if overlay is None:
         return
     now = time.monotonic()
     if indicator_motion.hidden(now) and state in ("recording", "transcribing"):
         _indicator_xy = None        # appearing: on the monitor you're on NOW
+        if _indicator_rebuild:
+            # The last appearance kept failing: start from a fresh window.
+            _indicator_rebuild = False
+            try:
+                overlay.close()
+            except Exception:
+                pass
+            build_overlay()
+            if overlay is None:
+                return
     indicator_motion.set_state(state, now)
     if overlay_anim_job is None and not indicator_motion.hidden(now):
         indicator.fine_timer(True)  # steady 60 fps while it moves (see fine_timer)
