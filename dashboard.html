@@ -136,7 +136,7 @@
       width: 24px; height: 24px; border-radius: 7px; background: var(--text); color: var(--bg);
       display: grid; place-items: center; flex-shrink: 0;
     }
-    .mark svg { width: 15px; height: 15px; }
+    .mark svg { width: 24px; height: 24px; }   /* brand.mark_svg(): drawn on the tile's own 24 grid */
     .brand .name { font: 600 15px var(--display); letter-spacing: -0.01em; }
     .nav { display: flex; flex-direction: column; gap: 2px; }
     .nav-item {
@@ -483,7 +483,7 @@
     <div class="wz-card">
       <div class="wz-head">
         <div class="brand">
-          <span class="mark"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="9" width="3" height="6" rx="1.5" fill="currentColor"/><rect x="8" y="5" width="3" height="14" rx="1.5" fill="currentColor"/><rect x="13" y="8" width="3" height="8" rx="1.5" fill="currentColor"/><rect x="18" y="10.5" width="3" height="3" rx="1.5" fill="currentColor"/></svg></span>
+          <span class="mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.20 12 L5.48 11.40 5.76 10.81 6.04 10.28 6.32 9.81 6.61 9.42 6.89 9.14 7.17 8.96 7.45 8.90 7.73 8.96 8.01 9.14 8.29 9.42 8.57 9.81 8.86 10.28 9.14 10.81 9.42 11.40 9.70 12 9.98 12.60 10.26 13.19 10.54 13.72 10.82 14.19 11.11 14.58 11.39 14.86 11.67 15.04 11.95 15.10 12.23 15.04 12.51 14.86 12.79 14.58 13.07 14.19 13.36 13.72 13.64 13.19 13.92 12.60 14.20 12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M18.80 4.40 L18.80 19.60" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg></span>
           <span class="name">Scribe</span>
         </div>
         <div class="wz-dots" aria-hidden="true"><span class="wz-dot"></span><span class="wz-dot"></span><span class="wz-dot"></span><span class="wz-dot"></span><span class="wz-dot"></span></div>
@@ -573,7 +573,7 @@
     <!-- Sidebar ============================================= -->
     <aside class="sidebar">
       <div class="brand">
-        <span class="mark"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="9" width="3" height="6" rx="1.5" fill="currentColor"/><rect x="8" y="5" width="3" height="14" rx="1.5" fill="currentColor"/><rect x="13" y="8" width="3" height="8" rx="1.5" fill="currentColor"/><rect x="18" y="10.5" width="3" height="3" rx="1.5" fill="currentColor"/></svg></span>
+        <span class="mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.20 12 L5.48 11.40 5.76 10.81 6.04 10.28 6.32 9.81 6.61 9.42 6.89 9.14 7.17 8.96 7.45 8.90 7.73 8.96 8.01 9.14 8.29 9.42 8.57 9.81 8.86 10.28 9.14 10.81 9.42 11.40 9.70 12 9.98 12.60 10.26 13.19 10.54 13.72 10.82 14.19 11.11 14.58 11.39 14.86 11.67 15.04 11.95 15.10 12.23 15.04 12.51 14.86 12.79 14.58 13.07 14.19 13.36 13.72 13.64 13.19 13.92 12.60 14.20 12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M18.80 4.40 L18.80 19.60" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg></span>
         <span class="name">Scribe</span>
       </div>
       <nav class="nav" id="main-nav">
