@@ -112,7 +112,9 @@ def test_the_shipped_files_are_the_new_logo():
     assert a > 200 and max(r, g, b) < 80 and abs(r - g) < 12, ("the dark tile, not the old green", (r, g, b))
     for name, dark in (("logo.svg", False), ("logo-dark.svg", True)):
         with open(os.path.join(ROOT, "docs", "images", name), encoding="utf-8") as f:
-            assert f.read() == brand.logo_svg(dark), f"docs/images/{name} is brand.logo_svg()"
+            # (compared without line endings: git may check the file out with CRLF)
+            assert f.read().replace("\r\n", "\n") == brand.logo_svg(dark), \
+                f"docs/images/{name} is brand.logo_svg()"
     readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
     assert "docs/images/logo.svg" in readme and "docs/images/logo-dark.svg" in readme
     print("PASS  scribe.ico and the README logo are the new mark.")
